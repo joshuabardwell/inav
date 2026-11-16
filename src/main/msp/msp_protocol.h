@@ -276,6 +276,8 @@
 #define MSP_SET_RESET_CURR_PID   219    //in message          resetting the current PID profile to defaults
 #define MSP_SET_SENSOR_ALIGNMENT 220    //in message          set the orientation of the acc,gyro,mag
 #define MSP_SET_LED_STRIP_MODECOLOR 221 //in  message         Set LED strip mode_color settings
+#define MSP_SET_VTXTABLE_BAND       227 //in message          Set vtxTable band/channel data (Betaflight format)
+#define MSP_SET_VTXTABLE_POWERLEVEL 228 //in message          Set vtxTable powerLevel data (Betaflight format)
 
 // #define MSP_BIND                 240    //in message          no param
 // #define MSP_ALARMS               242

@@ -165,3 +165,9 @@
 // command keeps its number, an unmerged one has no claim on it.
 #define MSP2_INAV_ESC_SRXL2_STATUS              0x2233
 #define MSP2_INAV_ESC_SRXL2_CALIBRATE           0x2234
+
+// Fork-local commands (not in upstream INAV). They start at 0x2F00 to stay clear of the IDs upstream hands out.
+// The vtxtable rows themselves use Betaflight's messages: MSP_VTXTABLE_BAND (137), MSP_VTXTABLE_POWERLEVEL (138),
+// MSP_SET_VTXTABLE_BAND (227) and MSP_SET_VTXTABLE_POWERLEVEL (228).
+#define MSP2_INAV_VTXTABLE_CONFIG               0x2F00  //out message  stored vtxtable sizes and limits; payload: U8 bands, U8 channels, U8 powerLevels, U8 maxBands, U8 maxChannels, U8 maxPowerLevels, U8 bandNameLength, U8 powerLabelLength, U16 maxFrequencyMhz
+#define MSP2_INAV_SET_VTXTABLE_CONFIG           0x2F01  //in message   set stored vtxtable sizes; payload: U8 bands, U8 channels, U8 powerLevels, U8 clear (1 = wipe all rows first)

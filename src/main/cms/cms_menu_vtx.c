@@ -136,6 +136,18 @@ static void cms_Vtx_initSettings(void)
     vtxChan = vtxSettingsConfig()->channel;
     vtxPower = vtxSettingsConfig()->power;
 
+    // The stored selection can exceed what is available now (vtx_band allows up to 8 for
+    // a vtxtable). Show "none" instead of reading past the end of the name lists.
+    if (vtxBand > cms_Vtx_EntBand.max) {
+        vtxBand = 0;
+    }
+    if (vtxChan > cms_Vtx_EntChan.max) {
+        vtxChan = 0;
+    }
+    if (vtxPower > cms_Vtx_EntPower.max) {
+        vtxPower = 0;
+    }
+
     // If device is ready - read actual PIT mode
     if (vtxCommonDeviceIsReady(vtxDevice)) {
         uint8_t onoff;

@@ -31,6 +31,7 @@
 
 #include "build/debug.h"
 #include "drivers/vtx_common.h"
+#include "drivers/vtx_table.h"
 #include "drivers/time.h"
 
 #include "common/maths.h"
@@ -407,11 +408,18 @@ static void impl_SetBandAndChannel(vtxDevice_t * vtxDevice, uint8_t band, uint8_
         return;
     }
 
-    // Default to 5.8 GHz
-    uint16_t newFreqMhz = vtx58_Bandchan2Freq(band, channel);
+    uint16_t newFreqMhz;
 
-    if (vtxSettingsConfig()->frequencyGroup == FREQUENCYGROUP_1G3) {
-        newFreqMhz = vtx1G3_Bandchan2Freq(band, channel);
+    if (vtxTableHasBands()) {
+        // Tramp is always tuned by frequency, so FACTORY and CUSTOM bands are handled alike
+        newFreqMhz = vtxTableLookupFrequency(band, channel);
+    } else {
+        // Default to 5.8 GHz
+        newFreqMhz = vtx58_Bandchan2Freq(band, channel);
+
+        if (vtxSettingsConfig()->frequencyGroup == FREQUENCYGROUP_1G3) {
+            newFreqMhz = vtx1G3_Bandchan2Freq(band, channel);
+        }
     }
 
     if (newFreqMhz < vtxState.capabilities.freqMin || newFreqMhz > vtxState.capabilities.freqMax) {
@@ -429,11 +437,25 @@ static void impl_SetPowerByIndex(vtxDevice_t * vtxDevice, uint8_t index)
 {
     UNUSED(vtxDevice);
 
-    if (!impl_IsReady(vtxDevice) || index < 1 || index > vtxState.metadata.powerTableCount) {
+    if (!impl_IsReady(vtxDevice) || index < 1) {
         return;
     }
 
-    unsigned reqPower = vtxState.metadata.powerTablePtr[index - 1];
+    unsigned reqPower;
+
+    if (vtxTableHasPowerLevels()) {
+        // Tramp power values in a vtxtable are milliwatts
+        uint16_t powerValue;
+        if (!vtxTableLookupPowerValue(index, &powerValue)) {
+            return;
+        }
+        reqPower = powerValue;
+    } else {
+        if (index > vtxState.metadata.powerTableCount) {
+            return;
+        }
+        reqPower = vtxState.metadata.powerTablePtr[index - 1];
+    }
 
     // Cap the power to the max capability of the VTX
     vtxState.request.power = MIN(reqPower, vtxState.capabilities.powerMax);
@@ -517,16 +539,23 @@ static bool impl_GetOsdInfo(const  vtxDevice_t *vtxDevice, vtxDeviceOsdInfo_t * 
     pOsdInfo->powerIndex = vtxState.request.powerIndex;
     pOsdInfo->powerMilliwatt = vtxState.request.power;
 
+    // Built-in names only cover the built-in bands. With a vtxtable the common layer replaces these names.
     switch (vtxSettingsConfig()->frequencyGroup) {
         case FREQUENCYGROUP_1G3:
-            pOsdInfo->bandLetter = vtx1G3BandNames[vtxState.request.band][0];
-            pOsdInfo->bandName = vtx1G3BandNames[vtxState.request.band];
-            pOsdInfo->channelName = vtx1G3ChannelNames[vtxState.request.channel];
+            {
+                const unsigned builtinBand = (vtxState.request.band <= VTX_TRAMP_1G3_BAND_COUNT) ? vtxState.request.band : 0;
+                pOsdInfo->bandLetter = vtx1G3BandNames[builtinBand][0];
+                pOsdInfo->bandName = vtx1G3BandNames[builtinBand];
+                pOsdInfo->channelName = vtx1G3ChannelNames[vtxState.request.channel];
+            }
             break;
         default: // Currently all except 1.3GHz
-            pOsdInfo->bandLetter = vtx58BandNames[vtxState.request.band][0];
-            pOsdInfo->bandName = vtx58BandNames[vtxState.request.band];
-            pOsdInfo->channelName = vtx58ChannelNames[vtxState.request.channel];
+            {
+                const unsigned builtinBand = (vtxState.request.band <= VTX_TRAMP_5G8_BAND_COUNT) ? vtxState.request.band : 0;
+                pOsdInfo->bandLetter = vtx58BandNames[builtinBand][0];
+                pOsdInfo->bandName = vtx58BandNames[builtinBand];
+                pOsdInfo->channelName = vtx58ChannelNames[vtxState.request.channel];
+            }
             break;
     }
     

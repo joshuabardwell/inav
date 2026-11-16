@@ -138,6 +138,10 @@
 #define PG_DRONECAN_DNA_SERVER 1047     // Separate PG so we don't wipe user settings if the allocation table changes
 #define PG_INAV_END PG_DRONECAN_DNA_SERVER
 
+// Fork-local parameter groups start at 3000, well clear of the IDs upstream hands out,
+// so a rebase onto a newer upstream never reuses one of these numbers.
+#define PG_VTX_TABLE_CONFIG 3000
+
 // OSD configuration (subject to change)
 //#define PG_OSD_FONT_CONFIG 2047
 //#define PG_OSD_VIDEO_CONFIG 2046

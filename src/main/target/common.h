@@ -373,6 +373,10 @@
 #ifndef USE_VTX_MSP
 #define USE_VTX_MSP
 #endif
+// User-defined VTX bands and power levels (Betaflight-compatible `vtxtable`)
+#ifndef USE_VTX_TABLE
+#define USE_VTX_TABLE
+#endif
 
 #ifndef USE_PROGRAMMING_FRAMEWORK
 #define USE_PROGRAMMING_FRAMEWORK

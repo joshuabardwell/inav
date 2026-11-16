@@ -71,6 +71,7 @@ bool cliMode = false;
 #include "drivers/time.h"
 #include "drivers/usb_msc.h"
 #include "drivers/vtx_common.h"
+#include "drivers/vtx_table.h"
 #include "fc/fc_core.h"
 #include "fc/cli.h"
 #include "fc/config.h"
@@ -97,6 +98,7 @@ bool cliMode = false;
 #include "io/osd/custom_elements.h"
 #include "io/motor_srxl2.h"
 #include "io/serial.h"
+#include "io/vtx_smartaudio.h"
 
 #include "fc/fc_msp_box.h"
 
@@ -149,7 +151,7 @@ static serialPort_t *cliPort;
 static bufWriter_t *cliWriter;
 static uint8_t cliWriteBuffer[sizeof(*cliWriter) + 128];
 
-static char cliBuffer[64];
+static char cliBuffer[128];   // 64 upstream; a `vtxtable band` line with 8 frequencies is up to 75 characters
 static uint32_t bufferIndex = 0;
 static uint16_t cliDelayMs = 0;
 
@@ -3188,6 +3190,364 @@ static void cliOsdLayout(char *cmdline)
 
 #endif
 
+#ifdef USE_VTX_TABLE
+// `vtxtable`: same syntax and output as Betaflight, so a Betaflight vtxtable can be pasted in unchanged.
+
+static char *formatVtxTableBandFrequency(const bool isFactory, const uint16_t *frequency, int channels)
+{
+    static char freqbuf[5 * VTX_TABLE_MAX_CHANNELS + 8 + 1];
+    char freqtmp[5 + 1];
+    freqbuf[0] = 0;
+    strcat(freqbuf, isFactory ? " FACTORY" : " CUSTOM ");
+    for (int channel = 0; channel < channels && channel < VTX_TABLE_MAX_CHANNELS; channel++) {
+        tfp_sprintf(freqtmp, " %4d", frequency[channel]);
+        strcat(freqbuf, freqtmp);
+    }
+    return freqbuf;
+}
+
+static void printVtxTableBand(uint8_t dumpMask, int band, const vtxTableConfig_t *currentConfig, const vtxTableConfig_t *defaultConfig)
+{
+    const char *fmt = "vtxtable band %d %s %c%s";
+    bool equalsDefault = false;
+
+    if (defaultConfig) {
+        equalsDefault = true;
+        if (sl_strcasecmp(currentConfig->bandNames[band], defaultConfig->bandNames[band])) {
+            equalsDefault = false;
+        }
+        if (currentConfig->bandLetters[band] != defaultConfig->bandLetters[band]) {
+            equalsDefault = false;
+        }
+        if (currentConfig->isFactoryBand[band] != defaultConfig->isFactoryBand[band]) {
+            equalsDefault = false;
+        }
+        for (int channel = 0; channel < VTX_TABLE_MAX_CHANNELS; channel++) {
+            if (currentConfig->frequency[band][channel] != defaultConfig->frequency[band][channel]) {
+                equalsDefault = false;
+            }
+        }
+        char *freqbuf = formatVtxTableBandFrequency(defaultConfig->isFactoryBand[band], defaultConfig->frequency[band], defaultConfig->channels);
+        cliDefaultPrintLinef(dumpMask, equalsDefault, fmt, band + 1, defaultConfig->bandNames[band], defaultConfig->bandLetters[band], freqbuf);
+    }
+
+    char *freqbuf = formatVtxTableBandFrequency(currentConfig->isFactoryBand[band], currentConfig->frequency[band], currentConfig->channels);
+    cliDumpPrintLinef(dumpMask, equalsDefault, fmt, band + 1, currentConfig->bandNames[band], currentConfig->bandLetters[band], freqbuf);
+}
+
+static char *formatVtxTablePowerValues(const uint16_t *levels, int count)
+{
+    // (max 5 digit + 1 space) per level
+    static char pwrbuf[6 * VTX_TABLE_MAX_POWER_LEVELS + 1];
+    char pwrtmp[6 + 1];
+    pwrbuf[0] = 0;
+    for (int pwrindex = 0; pwrindex < count && pwrindex < VTX_TABLE_MAX_POWER_LEVELS; pwrindex++) {
+        tfp_sprintf(pwrtmp, " %d", levels[pwrindex]);
+        strcat(pwrbuf, pwrtmp);
+    }
+    return pwrbuf;
+}
+
+static char *formatVtxTablePowerLabels(const char labels[VTX_TABLE_MAX_POWER_LEVELS][VTX_TABLE_POWER_LABEL_LENGTH + 1], int count)
+{
+    static char pwrbuf[(VTX_TABLE_POWER_LABEL_LENGTH + 1) * VTX_TABLE_MAX_POWER_LEVELS + 1];
+    char pwrtmp[(VTX_TABLE_POWER_LABEL_LENGTH + 1) + 1];
+    pwrbuf[0] = 0;
+    for (int pwrindex = 0; pwrindex < count && pwrindex < VTX_TABLE_MAX_POWER_LEVELS; pwrindex++) {
+        strcat(pwrbuf, " ");
+        strcpy(pwrtmp, labels[pwrindex]);
+        // trim trailing space
+        char *sp;
+        while ((sp = strchr(pwrtmp, ' '))) {
+            *sp = 0;
+        }
+        strcat(pwrbuf, pwrtmp);
+    }
+    return pwrbuf;
+}
+
+static void printVtxTable(uint8_t dumpMask, const vtxTableConfig_t *currentConfig, const vtxTableConfig_t *defaultConfig)
+{
+    bool equalsDefault;
+    const char *fmt;
+
+    // bands
+    equalsDefault = false;
+    fmt = "vtxtable bands %d";
+    if (defaultConfig) {
+        equalsDefault = (defaultConfig->bands == currentConfig->bands);
+        cliDefaultPrintLinef(dumpMask, equalsDefault, fmt, defaultConfig->bands);
+    }
+    cliDumpPrintLinef(dumpMask, equalsDefault, fmt, currentConfig->bands);
+
+    // channels
+    equalsDefault = false;
+    fmt = "vtxtable channels %d";
+    if (defaultConfig) {
+        equalsDefault = (defaultConfig->channels == currentConfig->channels);
+        cliDefaultPrintLinef(dumpMask, equalsDefault, fmt, defaultConfig->channels);
+    }
+    cliDumpPrintLinef(dumpMask, equalsDefault, fmt, currentConfig->channels);
+
+    // band
+    for (int band = 0; band < currentConfig->bands && band < VTX_TABLE_MAX_BANDS; band++) {
+        printVtxTableBand(dumpMask, band, currentConfig, defaultConfig);
+    }
+
+    // powerlevels
+    equalsDefault = false;
+    fmt = "vtxtable powerlevels %d";
+    if (defaultConfig) {
+        equalsDefault = (defaultConfig->powerLevels == currentConfig->powerLevels);
+        cliDefaultPrintLinef(dumpMask, equalsDefault, fmt, defaultConfig->powerLevels);
+    }
+    cliDumpPrintLinef(dumpMask, equalsDefault, fmt, currentConfig->powerLevels);
+
+    // powervalues
+    equalsDefault = false;
+    fmt = "vtxtable powervalues%s";
+    if (defaultConfig) {
+        equalsDefault = true;
+        for (int pwrindex = 0; pwrindex < VTX_TABLE_MAX_POWER_LEVELS; pwrindex++) {
+            if (defaultConfig->powerValues[pwrindex] != currentConfig->powerValues[pwrindex]) {
+                equalsDefault = false;
+            }
+        }
+        cliDefaultPrintLinef(dumpMask, equalsDefault, fmt, formatVtxTablePowerValues(defaultConfig->powerValues, defaultConfig->powerLevels));
+    }
+    cliDumpPrintLinef(dumpMask, equalsDefault, fmt, formatVtxTablePowerValues(currentConfig->powerValues, currentConfig->powerLevels));
+
+    // powerlabels
+    equalsDefault = false;
+    fmt = "vtxtable powerlabels%s";
+    if (defaultConfig) {
+        equalsDefault = true;
+        for (int pwrindex = 0; pwrindex < VTX_TABLE_MAX_POWER_LEVELS; pwrindex++) {
+            if (sl_strcasecmp(defaultConfig->powerLabels[pwrindex], currentConfig->powerLabels[pwrindex])) {
+                equalsDefault = false;
+            }
+        }
+        cliDefaultPrintLinef(dumpMask, equalsDefault, fmt, formatVtxTablePowerLabels(defaultConfig->powerLabels, defaultConfig->powerLevels));
+    }
+    cliDumpPrintLinef(dumpMask, equalsDefault, fmt, formatVtxTablePowerLabels(currentConfig->powerLabels, currentConfig->powerLevels));
+}
+
+static void cliVtxTable(char *cmdline)
+{
+    char *tok;
+    char *saveptr;
+    vtxTableConfig_t *config = vtxTableConfigMutable();
+
+    tok = strtok_r(cmdline, " ", &saveptr);
+
+    if (!tok) {
+        printVtxTable(DUMP_MASTER, config, NULL);
+#if defined(USE_VTX_SMARTAUDIO) && defined(USE_VTX_CONTROL)
+        if (saDevice.version == SA_2_1 && saPowerCount > 0) {
+            // What a SmartAudio 2.1 VTX says it supports: these are the numbers to use as powervalues
+            cliPrint("# VTX reports power levels (dBm):");
+            for (int i = 0; i < saPowerCount; i++) {
+                cliPrintf(" %d", saPowerTable[i].dbi);
+            }
+            cliPrintLinefeed();
+        }
+#endif
+        return;
+    }
+
+    if (sl_strcasecmp(tok, "bands") == 0) {
+        tok = strtok_r(NULL, " ", &saveptr);
+        if (!tok) {
+            cliShowParseError();
+            return;
+        }
+        const int bands = fastA2I(tok);
+        if (bands < 0 || bands > VTX_TABLE_MAX_BANDS) {
+            cliShowArgumentRangeError("BAND COUNT", 0, VTX_TABLE_MAX_BANDS);
+            return;
+        }
+        for (int i = bands; i < config->bands && i < VTX_TABLE_MAX_BANDS; i++) {
+            vtxTableConfigClearBand(config, i);
+        }
+        config->bands = bands;
+
+    } else if (sl_strcasecmp(tok, "channels") == 0) {
+        tok = strtok_r(NULL, " ", &saveptr);
+        if (!tok) {
+            cliShowParseError();
+            return;
+        }
+        const int channels = fastA2I(tok);
+        if (channels < 0 || channels > VTX_TABLE_MAX_CHANNELS) {
+            cliShowArgumentRangeError("CHANNEL COUNT", 0, VTX_TABLE_MAX_CHANNELS);
+            return;
+        }
+        if (channels < config->channels) {
+            for (int i = 0; i < VTX_TABLE_MAX_BANDS; i++) {
+                vtxTableConfigClearChannels(config, i, channels);
+            }
+        }
+        config->channels = channels;
+
+    } else if (sl_strcasecmp(tok, "powerlevels") == 0) {
+        tok = strtok_r(NULL, " ", &saveptr);
+        if (!tok) {
+            cliShowParseError();
+            return;
+        }
+        const int levels = fastA2I(tok);
+        if (levels < 0 || levels > VTX_TABLE_MAX_POWER_LEVELS) {
+            cliShowArgumentRangeError("POWER LEVEL COUNT", 0, VTX_TABLE_MAX_POWER_LEVELS);
+            return;
+        }
+        if (levels < config->powerLevels) {
+            vtxTableConfigClearPowerValues(config, levels);
+            vtxTableConfigClearPowerLabels(config, levels);
+        }
+        config->powerLevels = levels;
+
+    } else if (sl_strcasecmp(tok, "powervalues") == 0) {
+        uint16_t power[VTX_TABLE_MAX_POWER_LEVELS];
+        int count;
+        const int levels = config->powerLevels;
+
+        memset(power, 0, sizeof(power));
+
+        for (count = 0; count < levels && (tok = strtok_r(NULL, " ", &saveptr)); count++) {
+            const int value = fastA2I(tok);
+            if (value < 0 || value > UINT16_MAX) {
+                cliPrintErrorLinef("INVALID POWER VALUE %s", tok);
+                return;
+            }
+            power[count] = value;
+        }
+
+        if (count < levels) {
+            cliPrintErrorLinef("NOT ENOUGH VALUES (EXPECTED %d)", levels);
+            return;
+        } else if ((tok = strtok_r(NULL, " ", &saveptr))) {
+            cliPrintErrorLinef("TOO MANY VALUES (EXPECTED %d)", levels);
+            return;
+        }
+
+        for (int i = 0; i < VTX_TABLE_MAX_POWER_LEVELS; i++) {
+            config->powerValues[i] = power[i];
+        }
+
+    } else if (sl_strcasecmp(tok, "powerlabels") == 0) {
+        char label[VTX_TABLE_MAX_POWER_LEVELS][VTX_TABLE_POWER_LABEL_LENGTH + 1];
+        int count;
+        const int levels = config->powerLevels;
+
+        memset(label, 0, sizeof(label));
+
+        for (count = 0; count < levels && (tok = strtok_r(NULL, " ", &saveptr)); count++) {
+            strncpy(label[count], tok, VTX_TABLE_POWER_LABEL_LENGTH);
+            for (unsigned i = 0; i < strlen(label[count]); i++) {
+                label[count][i] = sl_toupper((unsigned char)label[count][i]);
+            }
+        }
+
+        if (count < levels) {
+            cliPrintErrorLinef("NOT ENOUGH LABELS (EXPECTED %d)", levels);
+            return;
+        } else if ((tok = strtok_r(NULL, " ", &saveptr))) {
+            cliPrintErrorLinef("TOO MANY LABELS (EXPECTED %d)", levels);
+            return;
+        }
+
+        for (int i = 0; i < count; i++) {
+            vtxTableStrncpyWithPad(config->powerLabels[i], label[i], VTX_TABLE_POWER_LABEL_LENGTH);
+        }
+
+    } else if (sl_strcasecmp(tok, "band") == 0) {
+        const int bands = config->bands;
+
+        tok = strtok_r(NULL, " ", &saveptr);
+        if (!tok) {
+            cliShowParseError();
+            return;
+        }
+
+        const int band = fastA2I(tok) - 1;
+
+        if (band < 0 || band >= bands) {
+            cliShowArgumentRangeError("BAND NUMBER", 1, bands);
+            return;
+        }
+
+        // Band name
+        tok = strtok_r(NULL, " ", &saveptr);
+        if (!tok) {
+            cliShowParseError();
+            return;
+        }
+
+        char bandname[VTX_TABLE_BAND_NAME_LENGTH + 1];
+        memset(bandname, 0, VTX_TABLE_BAND_NAME_LENGTH + 1);
+        strncpy(bandname, tok, VTX_TABLE_BAND_NAME_LENGTH);
+        for (unsigned i = 0; i < strlen(bandname); i++) {
+            bandname[i] = sl_toupper((unsigned char)bandname[i]);
+        }
+
+        // Band letter
+        tok = strtok_r(NULL, " ", &saveptr);
+        if (!tok) {
+            cliShowParseError();
+            return;
+        }
+
+        const char bandletter = sl_toupper((unsigned char)tok[0]);
+
+        uint16_t bandfreq[VTX_TABLE_MAX_CHANNELS];
+        int channel = 0;
+        const int channels = config->channels;
+        bool isFactory = false;
+
+        for (channel = 0; channel < channels && (tok = strtok_r(NULL, " ", &saveptr)); channel++) {
+            if (channel == 0 && !sl_isdigit((unsigned char)tok[0])) {
+                // Optional FACTORY / CUSTOM flag in front of the frequencies
+                channel -= 1;
+                if (sl_strcasecmp(tok, "FACTORY") == 0) {
+                    isFactory = true;
+                } else if (sl_strcasecmp(tok, "CUSTOM") == 0) {
+                    isFactory = false;
+                } else {
+                    cliPrintErrorLinef("INVALID FACTORY FLAG %s (EXPECTED FACTORY OR CUSTOM)", tok);
+                    return;
+                }
+                continue;
+            }
+            const int freq = fastA2I(tok);
+            if (freq < 0 || freq > VTX_TABLE_MAX_FREQUENCY_MHZ) {
+                cliPrintErrorLinef("INVALID FREQUENCY %s", tok);
+                return;
+            }
+            bandfreq[channel] = freq;
+        }
+
+        if (channel < channels) {
+            cliPrintErrorLinef("NOT ENOUGH FREQUENCIES (EXPECTED %d)", channels);
+            return;
+        } else if ((tok = strtok_r(NULL, " ", &saveptr))) {
+            cliPrintErrorLinef("TOO MANY FREQUENCIES (EXPECTED %d)", channels);
+            return;
+        }
+
+        vtxTableStrncpyWithPad(config->bandNames[band], bandname, VTX_TABLE_BAND_NAME_LENGTH);
+        config->bandLetters[band] = bandletter;
+
+        for (int i = 0; i < channel; i++) {
+            config->frequency[band][i] = bandfreq[i];
+        }
+        config->isFactoryBand[band] = isFactory;
+
+    } else {
+        cliPrintErrorLinef("INVALID SUBCOMMAND %s", tok);
+    }
+}
+#endif // USE_VTX_TABLE
+
 static void printTimerOutputModes(dumpFlags_e dumpFlags, const timerOverride_t* to, const timerOverride_t* defaultTimerOverride, int timer)
 {
     const char *format = "timer_output_mode %d %s";
@@ -4628,6 +4988,11 @@ static void printConfig(const char *cmdline, bool doDiff)
         printOsdLayout(dumpMask, &osdLayoutsConfig_Copy, osdLayoutsConfig(), -1, -1);
 #endif
 
+#ifdef USE_VTX_TABLE
+        cliPrintHashLine("VTX table [vtxtable]");
+        printVtxTable(dumpMask, &vtxTableConfig_Copy, vtxTableConfig());
+#endif
+
 #ifdef USE_PROGRAMMING_FRAMEWORK
         cliPrintHashLine("Programming: logic");
         printLogic(dumpMask, logicConditions_CopyArray, logicConditions(0), -1);
@@ -5162,6 +5527,10 @@ const clicmd_t cmdTable[] = {
     CLI_COMMAND_DEF("temp_sensor", "change temp sensor settings", NULL, cliTempSensor),
 #endif
     CLI_COMMAND_DEF("version", "show version", NULL, cliVersion),
+#ifdef USE_VTX_TABLE
+    CLI_COMMAND_DEF("vtxtable", "vtx frequency and power table (Betaflight syntax)",
+        "bands <n> | channels <n> | band <band> <name> <letter> [FACTORY|CUSTOM] <freq> ... | powerlevels <n> | powervalues <v> ... | powerlabels <l> ...", cliVtxTable),
+#endif
 #if defined(NAV_NON_VOLATILE_WAYPOINT_STORAGE) && defined(NAV_NON_VOLATILE_WAYPOINT_CLI)
     CLI_COMMAND_DEF("wp", "waypoint list", NULL, cliWaypoints),
 #endif

@@ -42,6 +42,7 @@
 
 #include "drivers/time.h"
 #include "drivers/vtx_common.h"
+#include "drivers/vtx_table.h"
 
 #include "fc/settings.h"
 
@@ -50,6 +51,17 @@
 #include "io/vtx_control.h"
 #include "io/vtx_smartaudio.h"
 #include "io/vtx_string.h"
+
+// saDevice.power while a vtxtable defines the power levels and the VTX reports a value that
+// is not in the table. Non-zero, so the device still counts as ready and the configured
+// level gets sent; reported to callers as power index 0 (unknown).
+#define SA_POWER_NOT_IN_TABLE (-1)
+
+// Number of settings (status) responses received from the VTX. The vtxtable code paths send a
+// request once and then wait for the next status report before deciding whether to repeat it.
+// Without that, a frequency change (up to two commands) plus a power change fills every slot
+// of the VTX task cycle, the status poll never runs, and the same commands repeat forever.
+static uint32_t saSettingsResponseCount = 0;
 
 
 // Timing parameters
@@ -356,10 +368,18 @@ static void saProcessResponse(uint8_t *buf, int len)
             saDevice.power = rawPowerValue + 1;
         }
 
+        if (vtxTableHasPowerLevels()) {
+            // The vtxtable's power values are what gets sent to the VTX (DAC value for V1,
+            // index for V2, dBm for V2.1), so match what the VTX reports against the same values.
+            const uint8_t tableIndex = vtxTableLookupPowerIndex(rawPowerValue);
+            saDevice.power = tableIndex ? tableIndex : SA_POWER_NOT_IN_TABLE;
+        }
+
         DEBUG_SET(DEBUG_SMARTAUDIO, 0, saDevice.version * 100 + saDevice.mode);
         DEBUG_SET(DEBUG_SMARTAUDIO, 1, saDevice.channel);
         DEBUG_SET(DEBUG_SMARTAUDIO, 2, saDevice.freq);
         DEBUG_SET(DEBUG_SMARTAUDIO, 3, saDevice.power);
+        saSettingsResponseCount++;
         break;
 
     case SA_CMD_SET_POWER: // Set Power
@@ -626,7 +646,8 @@ void saSetFreq(uint16_t freq)
     // value is unchanged from the previous 'user-freq' mode
     if ((saDevice.mode & SA_MODE_GET_FREQ_BY_FREQ) == 0 && freq == saDevice.freq) {
         memcpy(&switchBuf, &buf, sizeof(buf));
-        const uint16_t switchFreq = freq + ((freq == VTX_SMARTAUDIO_MAX_FREQUENCY_MHZ) ? -1 : 1);
+        // Step towards the middle of the band: a vtxtable can hold frequencies above 5999
+        const uint16_t switchFreq = freq + ((freq >= VTX_SMARTAUDIO_MAX_FREQUENCY_MHZ) ? -1 : 1);
         switchBuf[4] = (switchFreq >> 8);
         switchBuf[5] = switchFreq & 0xff;
         switchBuf[6] = CRC8(switchBuf, 6);
@@ -795,6 +816,35 @@ static bool vtxSAIsReady(const vtxDevice_t *vtxDevice)
 void vtxSASetBandAndChannel(vtxDevice_t *vtxDevice, uint8_t band, uint8_t channel)
 {
     UNUSED(vtxDevice);
+
+    if (vtxTableHasBands()) {
+        static uint8_t requestedBand;
+        static uint8_t requestedChannel;
+        static uint32_t requestedAtResponseCount;
+
+        const uint16_t freq = vtxTableLookupFrequency(band, channel);
+        if (!freq) {
+            return; // outside the table, or a channel the table marks unused
+        }
+        if (saDevice.version == SA_UNKNOWN) {
+            return; // nothing heard from the VTX yet
+        }
+        if (requestedBand == band && requestedChannel == channel && requestedAtResponseCount == saSettingsResponseCount) {
+            return; // already requested; wait for the VTX's next status report (see saSettingsResponseCount)
+        }
+        requestedBand = band;
+        requestedChannel = channel;
+        requestedAtResponseCount = saSettingsResponseCount;
+
+        if (vtxTableIsFactoryBand(band)) {
+            // The VTX has this band built in: select it by number and let the VTX pick the frequency
+            saSetBandAndChannel(band - 1, channel - 1);
+        } else {
+            saSetFreq(freq);
+        }
+        return;
+    }
+
     if (saValidateBandAndChannel(band, channel)) {
         saSetBandAndChannel(band - 1, channel - 1);
     }
@@ -809,6 +859,33 @@ void vtxSASetBandAndChannel(vtxDevice_t *vtxDevice, uint8_t band, uint8_t channe
 
     if (index == 0) {
         LOG_DEBUG(VTX, "SmartAudio doesn't support power off");
+        return;
+    }
+
+    if (vtxTableHasPowerLevels()) {
+        static uint8_t requestedIndex;
+        static uint32_t requestedAtResponseCount;
+
+        uint16_t powerValue;
+        if (!vtxTableLookupPowerValue(index, &powerValue)) {
+            LOG_DEBUG(VTX, "Power level not in vtxtable");
+            return;
+        }
+        if (saDevice.version == SA_UNKNOWN) {
+            return; // the encoding of the value depends on the SmartAudio version
+        }
+        if (requestedIndex == index && requestedAtResponseCount == saSettingsResponseCount) {
+            return; // already requested; wait for the VTX's next status report (see saSettingsResponseCount)
+        }
+        requestedIndex = index;
+        requestedAtResponseCount = saSettingsResponseCount;
+
+        buf[4] = powerValue;
+        if (saDevice.version == SA_2_1) {
+            buf[4] |= 128; //set MSB to indicate set power by dbm
+        }
+        buf[5] = CRC8(buf, 5);
+        saQueueCmd(buf, 6);
         return;
     }
 
@@ -892,6 +969,24 @@ static bool vtxSAGetBandAndChannel(const vtxDevice_t *vtxDevice, uint8_t *pBand,
         return false;
     }
 
+    if (vtxTableHasBands()) {
+        if (saDevice.mode & SA_MODE_GET_FREQ_BY_FREQ) {
+            // The VTX was tuned by frequency (a CUSTOM band): find that frequency in the table,
+            // preferring the configured band/channel when two entries share it.
+            vtxTableLookupBandChannel(saDevice.freq, vtxSettingsConfig()->band, vtxSettingsConfig()->channel, pBand, pChannel);
+        } else {
+            *pBand = SA_DEVICE_CHVAL_TO_BAND(saDevice.channel) + 1;
+            *pChannel = SA_DEVICE_CHVAL_TO_CHANNEL(saDevice.channel) + 1;
+            if (!vtxTableIsFactoryBand(*pBand)) {
+                // The VTX sits on one of its built-in channels, but the table has no FACTORY band
+                // at that position. Report "unknown" so the configured selection is sent again.
+                *pBand = 0;
+                *pChannel = 0;
+            }
+        }
+        return true;
+    }
+
     // if in user-freq mode then report band as zero
     *pBand = (saDevice.mode & SA_MODE_GET_FREQ_BY_FREQ) ? 0 :
         (SA_DEVICE_CHVAL_TO_BAND(saDevice.channel) + 1);
@@ -904,6 +999,12 @@ static bool vtxSAGetPowerIndex(const vtxDevice_t *vtxDevice, uint8_t *pIndex)
 {
     if (!vtxSAIsReady(vtxDevice)) {
         return false;
+    }
+
+    if (vtxTableHasPowerLevels()) {
+        // saDevice.power already holds the vtxtable index (see saProcessResponse)
+        *pIndex = (saDevice.power > 0) ? saDevice.power : 0;
+        return true;
     }
 
     *pIndex = ((saDevice.version == SA_1_0) ? saDacToPowerIndex(saDevice.power) : saDevice.power);
@@ -926,6 +1027,14 @@ static bool vtxSAGetFreq(const vtxDevice_t *vtxDevice, uint16_t *pFreq)
         return false;
     }
 
+    if (vtxTableHasBands() && !(saDevice.mode & SA_MODE_GET_FREQ_BY_FREQ)) {
+        // Built-in channel: the table says what frequency that is. Fall back to what the VTX reports.
+        const uint16_t tableFreq = vtxTableLookupFrequency(SA_DEVICE_CHVAL_TO_BAND(saDevice.channel) + 1,
+            SA_DEVICE_CHVAL_TO_CHANNEL(saDevice.channel) + 1);
+        *pFreq = tableFreq ? tableFreq : saDevice.freq;
+        return true;
+    }
+
     // if not in user-freq mode then convert band/chan to frequency
     *pFreq = (saDevice.mode & SA_MODE_GET_FREQ_BY_FREQ) ? saDevice.freq :
         vtx58_Bandchan2Freq(SA_DEVICE_CHVAL_TO_BAND(saDevice.channel) + 1,
@@ -942,6 +1051,17 @@ static bool vtxSAGetPower(const vtxDevice_t *vtxDevice, uint8_t *pIndex, uint16_
     }
 
     *pIndex = powerIndex;
+
+    if (vtxTableHasPowerLevels()) {
+        uint16_t powerValue;
+        if (saDevice.version == SA_2_1 && vtxTableLookupPowerValue(powerIndex, &powerValue)) {
+            *pPowerMw = saDbiToMw(powerValue); // V2.1 power values are dBm
+        } else {
+            *pPowerMw = vtxTableLookupPowerMilliwatt(powerIndex);
+        }
+        return true;
+    }
+
     *pPowerMw = (powerIndex > 0) ? saPowerTable[powerIndex - 1].mW : 0;
     return true;
 }
@@ -970,8 +1090,10 @@ static bool vtxSAGetOsdInfo(const  vtxDevice_t *vtxDevice, vtxDeviceOsdInfo_t * 
     pOsdInfo->frequency = freq;
     pOsdInfo->powerIndex = powerIndex;
     pOsdInfo->powerMilliwatt = powerMw;
-    pOsdInfo->bandLetter = vtx58BandNames[band][0];
-    pOsdInfo->bandName = vtx58BandNames[band];
+    // Built-in names cover bands 0-5 only. With a vtxtable the common layer replaces these names.
+    const uint8_t builtinBand = (band <= VTX_SMARTAUDIO_MAX_BAND) ? band : 0;
+    pOsdInfo->bandLetter = vtx58BandNames[builtinBand][0];
+    pOsdInfo->bandName = vtx58BandNames[builtinBand];
     pOsdInfo->channelName = vtx58ChannelNames[channel];
     pOsdInfo->powerIndexLetter = '0' + powerIndex;
     return true;

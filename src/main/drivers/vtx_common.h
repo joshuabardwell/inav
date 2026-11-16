@@ -17,14 +17,19 @@
 
 /* Created by jflyper */
 
+#pragma once
+
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "common/time.h"
 
 #define VTX_SETTINGS_MIN_BAND       1
-#define VTX_SETTINGS_MAX_BAND       5
+#define VTX_SETTINGS_MAX_BAND       8   // a vtxtable can define up to 8 bands (VTX_TABLE_MAX_BANDS)
 #define VTX_SETTINGS_MIN_CHANNEL    1
 #define VTX_SETTINGS_MAX_CHANNEL    8
 
-#define VTX_SETTINGS_BAND_COUNT     (VTX_SETTINGS_MAX_BAND - VTX_SETTINGS_MIN_BAND + 1)
+#define VTX_SETTINGS_BAND_COUNT     5   // bands in the built-in 5.8GHz table (vtx58BandNames)
 #define VTX_SETTINGS_CHANNEL_COUNT  (VTX_SETTINGS_MAX_CHANNEL - VTX_SETTINGS_MIN_CHANNEL + 1)
 
 #define VTX_SETTINGS_DEFAULT_BAND               4

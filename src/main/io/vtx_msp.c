@@ -30,6 +30,7 @@
 #include "common/log.h"
 #include "common/crc.h"
 #include "drivers/vtx_common.h"
+#include "drivers/vtx_table.h"
 #include "msp/msp_protocol.h"
 #include "rx/rx.h"
 #include "rx/crsf.h"
@@ -91,24 +92,37 @@ static vtxDevType_e vtxMspGetDeviceType(const vtxDevice_t *);
 static bool vtxMspIsReady(const vtxDevice_t *);
 static vtxDevice_t vtxMsp;
 
+static uint16_t vtxMspBandChannelToFreq(uint8_t band, uint8_t channel)
+{
+    return vtxTableHasBands() ? vtxTableLookupFrequency(band, channel) : vtx58_Bandchan2Freq(band, channel);
+}
+
 static void prepareMspFrame(vtxDevice_t *vtxDevice, uint8_t *mspFrame)
 {
+    // Counts come from the user's vtxtable where it defines them
+    vtxDeviceCapability_t capability = vtxMsp.capability;
+    vtxTableOverlayCapability(&capability);
+
+    // With a vtxtable the frequency is sent as well, so the VTX does not have to hold the same table
+    const bool useTable = vtxTableHasBands();
+    const uint16_t freq = useTable ? vtxState.request.freq : 0;
+
     // Send an MSP_VTX_V2 frame to the VTX
     mspFrame[0]  = vtxMspGetDeviceType(vtxDevice);
     mspFrame[1]  = vtxState.request.band;
     mspFrame[2]  = vtxState.request.channel;
     mspFrame[3]  = vtxState.request.powerIndex;
     mspFrame[4]  = vtxState.request.pitMode;
-    mspFrame[5]  = 0; // Freq_L 
-    mspFrame[6]  = 0; // Freq_H
+    mspFrame[5]  = freq & 0xFF; // Freq_L
+    mspFrame[6]  = (freq >> 8) & 0xFF; // Freq_H
     mspFrame[7]  = vtxMspIsReady(vtxDevice);
     mspFrame[8]  = vtxSettingsConfig()->lowPowerDisarm;
     mspFrame[9]  = 0; // pitmode freq Low
     mspFrame[10] = 0; // pitmode freq High
-    mspFrame[11] = 0; // 1 if using vtx table
-    mspFrame[12] = vtxMsp.capability.bandCount; // bands or 0
-    mspFrame[13] = vtxMsp.capability.channelCount; // channels or 0
-    mspFrame[14] = vtxMsp.capability.powerCount; // power levels or 0
+    mspFrame[11] = useTable ? 1 : 0; // 1 if using vtx table
+    mspFrame[12] = capability.bandCount; // bands or 0
+    mspFrame[13] = capability.channelCount; // channels or 0
+    mspFrame[14] = capability.powerCount; // power levels or 0
 } 
 
 static void mspCrsfPush(const uint8_t mspCommand, const uint8_t *mspFrame, const uint8_t mspFrameSize)
@@ -202,13 +216,17 @@ static void vtxMspSetBandAndChannel(vtxDevice_t *vtxDevice, uint8_t band, uint8_
 {
     UNUSED(vtxDevice);
 
-    if (band < VTX_MSP_MIN_BAND || band > VTX_MSP_MAX_BAND || channel < VTX_MSP_MIN_CHANNEL || channel > VTX_MSP_MAX_CHANNEL) {
+    if (vtxTableHasBands()) {
+        if (!vtxTableLookupFrequency(band, channel)) {
+            return; // outside the table, or a channel the table marks unused
+        }
+    } else if (band < VTX_MSP_MIN_BAND || band > VTX_MSP_MAX_BAND || channel < VTX_MSP_MIN_CHANNEL || channel > VTX_MSP_MAX_CHANNEL) {
         return;
     }
 
     vtxState.request.band = band;
     vtxState.request.channel = channel;
-    vtxState.request.freq = vtx58_Bandchan2Freq(band, channel);
+    vtxState.request.freq = vtxMspBandChannelToFreq(band, channel);
     vtxState.updateReqMask |= VTX_UPDATE_REQ_FREQUENCY;
 }
 
@@ -216,7 +234,14 @@ static void vtxMspSetPowerByIndex(vtxDevice_t *vtxDevice, uint8_t index)
 {
     UNUSED(vtxDevice);
 
-    vtxState.request.power = vtxMspPowerTable[index];
+    if (vtxTableHasPowerLevels()) {
+        // The VTX is sent the level number; milliwatts are only kept for the OSD
+        vtxState.request.power = vtxTableLookupPowerMilliwatt(index);
+    } else if (index <= VTX_MSP_POWER_COUNT) {
+        vtxState.request.power = vtxMspPowerTable[index];
+    } else {
+        return;
+    }
     vtxState.request.powerIndex = index;
     vtxState.updateReqMask |= VTX_UPDATE_REQ_POWER;
 }
@@ -280,9 +305,12 @@ static bool vtxMspGetOsdInfo(const vtxDevice_t *vtxDevice, vtxDeviceOsdInfo_t *p
     pOsdInfo->frequency = vtxState.request.freq;
     pOsdInfo->powerIndex = vtxState.request.powerIndex;
     pOsdInfo->powerMilliwatt = vtxState.request.power;
-    pOsdInfo->bandName = vtxMspBandNames[vtxState.request.band];
-    pOsdInfo->bandLetter = vtxMspBandLetters[vtxState.request.band];
-    pOsdInfo->channelName = vtxMspChannelNames[vtxState.request.channel];
+    // Built-in names only cover the built-in bands. With a vtxtable the common layer replaces these names.
+    const uint8_t builtinBand = (vtxState.request.band <= VTX_MSP_MAX_BAND) ? vtxState.request.band : 0;
+    const uint8_t builtinChannel = (vtxState.request.channel <= VTX_MSP_MAX_CHANNEL) ? vtxState.request.channel : 0;
+    pOsdInfo->bandName = vtxMspBandNames[builtinBand];
+    pOsdInfo->bandLetter = vtxMspBandLetters[builtinBand];
+    pOsdInfo->channelName = vtxMspChannelNames[builtinChannel];
     pOsdInfo->powerIndexLetter = '0' + vtxState.request.powerIndex;
 
     return true;
@@ -331,7 +359,7 @@ bool vtxMspInit(void)
     vtxState.crsfTelemetryEnabled = crsfRxIsActive();
     vtxState.request.band =  vtxSettingsConfig()->band;
     vtxState.request.channel = vtxSettingsConfig()->channel;
-    vtxState.request.freq = vtx58_Bandchan2Freq(vtxState.request.band, vtxState.request.channel);
+    vtxState.request.freq = vtxMspBandChannelToFreq(vtxState.request.band, vtxState.request.channel);
     vtxState.request.power = vtxSettingsConfig()->power;
     vtxState.request.pitMode = 0;
     vtxCommonSetDevice(&vtxMsp);

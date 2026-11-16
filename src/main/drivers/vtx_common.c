@@ -27,8 +27,17 @@
 #include "common/log.h"
 
 #include "vtx_common.h"
+#include "vtx_table.h"
 
 static vtxDevice_t *commonVtxDevice = NULL;
+
+// What the device supports, with band, channel and power counts and names
+// replaced by the user's vtxtable where that table defines them.
+static void vtxCommonEffectiveCapability(const vtxDevice_t *vtxDevice, vtxDeviceCapability_t *pDeviceCapability)
+{
+    memcpy(pDeviceCapability, &vtxDevice->capability, sizeof(vtxDeviceCapability_t));
+    vtxTableOverlayCapability(pDeviceCapability);
+}
 
 void vtxCommonInit(void)
 {
@@ -74,7 +83,10 @@ void vtxCommonSetBandAndChannel(vtxDevice_t *vtxDevice, uint8_t band, uint8_t ch
     if (!vtxDevice)
         return;
 
-    if ((band > vtxDevice->capability.bandCount) || (channel > vtxDevice->capability.channelCount)) {
+    vtxDeviceCapability_t capability;
+    vtxCommonEffectiveCapability(vtxDevice, &capability);
+
+    if ((band > capability.bandCount) || (channel > capability.channelCount)) {
         return;
     }
 
@@ -89,7 +101,10 @@ void vtxCommonSetPowerByIndex(vtxDevice_t *vtxDevice, uint8_t index)
     if (!vtxDevice)
         return;
 
-    if (index > vtxDevice->capability.powerCount)
+    vtxDeviceCapability_t capability;
+    vtxCommonEffectiveCapability(vtxDevice, &capability);
+
+    if (index > capability.powerCount)
         return;
 
     if (vtxDevice->vTable->setPowerByIndex) {
@@ -140,7 +155,7 @@ bool vtxCommonGetFrequency(const vtxDevice_t *vtxDevice, uint16_t *pFrequency)
 bool vtxCommonGetDeviceCapability(vtxDevice_t *vtxDevice, vtxDeviceCapability_t *pDeviceCapability)
 {
     if (vtxDevice) {
-        memcpy(pDeviceCapability, &vtxDevice->capability, sizeof(vtxDeviceCapability_t));
+        vtxCommonEffectiveCapability(vtxDevice, pDeviceCapability);
         return true;
     }
     return false;
@@ -173,6 +188,9 @@ bool vtxCommonGetOsdInfo(vtxDevice_t *vtxDevice, vtxDeviceOsdInfo_t * pOsdInfo)
         pOsdInfo->bandName = "-";
         pOsdInfo->channelName = "-";
         pOsdInfo->powerIndexLetter = '0';
+    } else {
+        // Drivers fill in names from their built-in tables; a vtxtable takes precedence
+        vtxTableOverlayOsdInfo(pOsdInfo);
     }
 
     return ret;

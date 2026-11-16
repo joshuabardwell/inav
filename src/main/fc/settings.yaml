@@ -4414,7 +4414,7 @@ groups:
     condition: USE_VTX_SMARTAUDIO || USE_VTX_TRAMP
     members:
       - name: vtx_band
-        description: "Configure the VTX band. Bands: 1: A, 2: B, 3: E, 4: F, 5: Race."
+        description: "Configure the VTX band. Without a `vtxtable` the bands are 1: A, 2: B, 3: E, 4: F, 5: Race. With a `vtxtable` this is the band number in that table (up to 8)."
         default_value: 1
         field: band
         min: VTX_SETTINGS_MIN_BAND

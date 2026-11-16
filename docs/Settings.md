@@ -7566,7 +7566,7 @@ When slowing down from FW to MC, the transition is considered complete once airs
 
 ### vtx_band
 
-Configure the VTX band. Bands: 1: A, 2: B, 3: E, 4: F, 5: Race.
+Configure the VTX band. Without a `vtxtable` the bands are 1: A, 2: B, 3: E, 4: F, 5: Race. With a `vtxtable` this is the band number in that table (up to 8).
 
 | Default | Min | Max |
 | --- | --- | --- |

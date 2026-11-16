@@ -298,6 +298,8 @@ main_sources(COMMON_SRC
     drivers/usb_msc.h
     drivers/vtx_common.c
     drivers/vtx_common.h
+    drivers/vtx_table.c
+    drivers/vtx_table.h
 
 
     fc/cli.c
