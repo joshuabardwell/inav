@@ -57,6 +57,8 @@
 #define SMARTAUDIO_CMD_TIMEOUT       120    // Time until the command is considered lost
 #define SMARTAUDIO_POLLING_INTERVAL  150    // Minimum time between state polling
 #define SMARTAUDIO_POLLING_WINDOW   1000    // Time window after command polling for state change
+#define SMARTAUDIO_KEEPALIVE_INTERVAL 1000  // Poll an idle VTX this often, to notice when it stops answering
+#define SMARTAUDIO_OFFLINE_TIMEOUT  3000    // No answer for this long: the VTX is not ready
 
 static serialPort_t *smartAudioSerialPort = NULL;
 
@@ -272,6 +274,7 @@ static timeUs_t sa_lastTransmissionMs = 0;
 static uint8_t sa_outstanding = SA_CMD_NONE; // Outstanding command
 static uint8_t sa_osbuf[32]; // Outstanding comamnd frame for retransmission
 static int sa_oslen;         // And associate length
+static timeMs_t sa_lastResponseMs = 0; // When the VTX last sent a valid response
 
 static void saProcessResponse(uint8_t *buf, int len)
 {
@@ -397,6 +400,8 @@ static void saProcessResponse(uint8_t *buf, int len)
         saStat.badcode++;
         return;
     }
+
+    sa_lastResponseMs = millis();
 
     if (memcmp(&saDevice, &saDevicePrev, sizeof(smartAudioDevice_t))) {
         // Debug
@@ -775,6 +780,11 @@ static void vtxSAProcess(vtxDevice_t *vtxDevice, timeUs_t currentTimeUs)
     //LOG_DEBUG(VTX, "process: sending status change polling");
     saGetSettings();
     saSendQueue();
+    } else if (nowMs - sa_lastTransmissionMs >= SMARTAUDIO_KEEPALIVE_INTERVAL) {
+        // Nothing to send: ask for the settings anyway, so a VTX that stops answering
+        // (unplugged, powered down) stops reading as ready
+        saGetSettings();
+        saSendQueue();
     }
 }
 
@@ -788,8 +798,10 @@ vtxDevType_e vtxSAGetDeviceType(const vtxDevice_t *vtxDevice)
 
 static bool vtxSAIsReady(const vtxDevice_t *vtxDevice)
 {
-    return vtxDevice != NULL && !(saDevice.power == 0);
-    //wait until power reading exists
+    // Ready once the VTX has answered, and only while it keeps answering the polls in
+    // vtxSAProcess(). saDevice holds made-up defaults until the first answer.
+    return vtxDevice != NULL && saDevice.version != SA_UNKNOWN &&
+        (millis() - sa_lastResponseMs) < SMARTAUDIO_OFFLINE_TIMEOUT;
 }
 
 void vtxSASetBandAndChannel(vtxDevice_t *vtxDevice, uint8_t band, uint8_t channel)
