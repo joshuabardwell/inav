@@ -93,7 +93,10 @@ Parameters:
 	  * Bit 2 - WP Action 2
       * Bit 3 - WP Action 3
       * Bit 4 - WP Action 4
-	  * Bits 5 - 15 : undefined / reserved.
+	  * Bit 5 : undefined / reserved.
+	  * Bits 6 - 12 (this fork, WAYPOINT and POSHOLD_TIME only) : minimum height above ground for the leg flown to this waypoint, in metres (50 - 120). 0 uses `terrain_nav_min_agl`.
+	  * Bits 13 - 14 (this fork, WAYPOINT and POSHOLD_TIME only) : terrain mode for the leg flown to this waypoint. 0 off, 1 floor, 2 follow. See [Terrain AGL Hold](Navigation%20Terrain%20Following.md#waypoint-missions).
+	  * Bit 15 : undefined / reserved.
 
       Note:
 

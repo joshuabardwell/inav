@@ -165,3 +165,13 @@
 // command keeps its number, an unmerged one has no claim on it.
 #define MSP2_INAV_ESC_SRXL2_STATUS              0x2233
 #define MSP2_INAV_ESC_SRXL2_CALIBRATE           0x2234
+
+// Fork-local commands (not in upstream INAV), from 0x2F00.
+// 0x2F00 and 0x2F01 are the vtxtable size commands (branch jb/vtxtable).
+// in/out message: terrain height from the SD card map at up to 8 points.
+//   request:  n x { I32 lat, I32 lon } (deg * 1e7), n = 0..8
+//   reply:    U8 version (1), U8 flags, U8 block cache size, I16 home terrain height [m], U8 n,
+//             n x { U8 status, I32 height [cm] }
+//   flags:    bit 0 terrain_enabled, bit 1 SD/IO failure, bit 2 healthy, bit 3 home height valid, bit 4 armed
+//   status:   0 height valid, 1 no data (block still loading, or no tile), 2 refused (armed)
+#define MSP2_INAV_TERRAIN_HEIGHT                0x2F02

@@ -145,6 +145,12 @@
 
 #include "telemetry/telemetry.h"
 
+#ifdef USE_TERRAIN
+#include "terrain/terrain.h"
+#include "terrain/terrain_io.h"
+#include "terrain/terrain_nav.h"
+#endif
+
 #ifdef USE_HARDWARE_REVISION_DETECTION
 #include "hardware_revision.h"
 #endif
@@ -4776,6 +4782,76 @@ static mspResult_e mspProcessSimulatorCommand(sbuf_t *dst, sbuf_t *src, const in
 #endif
 
 
+#ifdef USE_TERRAIN
+#define MSP_TERRAIN_HEIGHT_VERSION      1
+#define MSP_TERRAIN_HEIGHT_MAX_POINTS   8
+
+// MSP2_INAV_TERRAIN_HEIGHT: what the SD card terrain map says at a few points.
+// Lets a mission planner check that the card has the tiles a mission needs and
+// that they match the planner's own copy. A block that is not cached yet is
+// scheduled for loading and answered "no data"; asking again a moment later
+// gets the height. Refused while armed, so a ground station can never push
+// the aircraft's own blocks out of the small cache in flight
+static mspResult_e mspProcessTerrainHeightCommand(sbuf_t *dst, sbuf_t *src, const unsigned int dataSize)
+{
+    if ((dataSize % 8) != 0 || dataSize > 8 * MSP_TERRAIN_HEIGHT_MAX_POINTS) {
+        return MSP_RESULT_ERROR;
+    }
+
+    const uint8_t count = dataSize / 8;
+    const bool armed = ARMING_FLAG(ARMED);
+
+    float homeHeightM = 0.0f;
+    const bool homeValid = terrainNavGetLatchedHomeHeight(&homeHeightM);
+
+    uint8_t flags = 0;
+    if (terrainConfig()->terrainEnabled) {
+        flags |= (1 << 0);
+    }
+    if (isTerrainIoFailure()) {
+        flags |= (1 << 1);
+    }
+    if (terrainNavIsHealthy()) {
+        flags |= (1 << 2);
+    }
+    if (homeValid) {
+        flags |= (1 << 3);
+    }
+    if (armed) {
+        flags |= (1 << 4);
+    }
+
+    sbufWriteU8(dst, MSP_TERRAIN_HEIGHT_VERSION);
+    sbufWriteU8(dst, flags);
+    sbufWriteU8(dst, TERRAIN_GRID_BLOCK_CACHE_SIZE);
+    sbufWriteU16(dst, (uint16_t)(int16_t)lrintf(homeValid ? homeHeightM : 0.0f));
+    sbufWriteU8(dst, count);
+
+    for (int i = 0; i < count; i++) {
+        gpsLocation_t loc;
+        loc.lat = (int32_t)sbufReadU32(src);
+        loc.lon = (int32_t)sbufReadU32(src);
+        loc.alt = 0;
+
+        float heightM = 0.0f;
+        uint8_t status;
+        if (armed) {
+            status = 2;
+        } else if (terrainNavGetHeightAtLocation(&loc, &heightM)) {
+            status = 0;
+        } else {
+            status = 1;
+            heightM = 0.0f;
+        }
+
+        sbufWriteU8(dst, status);
+        sbufWriteU32(dst, (uint32_t)(int32_t)lrintf(heightM * 100.0f));
+    }
+
+    return MSP_RESULT_ACK;
+}
+#endif
+
 bool mspFCProcessInOutCommand(uint16_t cmdMSP, sbuf_t *dst, sbuf_t *src, mspResult_e *ret)
 {
     const unsigned int dataSize = sbufBytesRemaining(src);
@@ -5050,6 +5126,11 @@ bool mspFCProcessInOutCommand(uint16_t cmdMSP, sbuf_t *dst, sbuf_t *src, mspResu
 #ifdef USE_SIMULATOR
     case MSP_SIMULATOR:
         *ret = mspProcessSimulatorCommand(dst, src, dataSize);
+        break;
+#endif
+#ifdef USE_TERRAIN
+    case MSP2_INAV_TERRAIN_HEIGHT:
+        *ret = mspProcessTerrainHeightCommand(dst, src, dataSize);
         break;
 #endif
 #ifndef SITL_BUILD

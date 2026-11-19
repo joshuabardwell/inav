@@ -584,6 +584,8 @@ typedef enum {
     NAV_WP_USER2 = (1<<2),
     NAV_WP_USER3 = (1<<3),
     NAV_WP_USER4 = (1<<4)
+    // Bits 6-12 (per-waypoint minimum height above ground) and 13-14 (terrain
+    // mode) are this fork's terrain options: terrain/terrain_nav_mission_logic.h
 } navWaypointP3Flags_e;
 
 typedef struct {

@@ -707,6 +707,9 @@ main_sources(COMMON_SRC
     terrain/terrain_nav_hold_core.c
     terrain/terrain_nav_hold.h
     terrain/terrain_nav_hold.c
+    terrain/terrain_nav_mission_logic.h
+    terrain/terrain_nav_mission.h
+    terrain/terrain_nav_mission.c
 )
 
 list(APPEND COMMON_SRC ${DSDLC_GENERATED_SRC})

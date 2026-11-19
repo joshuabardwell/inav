@@ -67,3 +67,13 @@ bool terrainNavGetHomeTerrainHeight(float *heightM);
 // early-climb demand model), escapeDeficitM the deficit vs escapeRatio (the
 // full-capability escape test) - same samples, no extra SD load
 bool terrainNavLookahead(float bearingDeg, float distanceM, float climbRatio, float escapeRatio, terrainNavLookaheadResult_t *result);
+
+// The same walk for a route with one turn (waypoint missions): bearingDeg for
+// turnDistanceM, then turnBearingDeg; turnExtraRiseM is added to the terrain
+// rise of the samples past the turn
+bool terrainNavLookaheadRoute(float bearingDeg, float distanceM, float climbRatio, float escapeRatio,
+                              float turnDistanceM, float turnBearingDeg, float turnExtraRiseM,
+                              terrainNavLookaheadResult_t *result);
+
+// Home terrain height as latched when the GPS origin was set (no map query)
+bool terrainNavGetLatchedHomeHeight(float *heightM);

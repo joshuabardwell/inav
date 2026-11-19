@@ -210,4 +210,87 @@ bool terrainNavLookahead(float bearingDeg, float distanceM, float climbRatio, fl
     return true;
 }
 
+// The home terrain height the AGL above is measured against, as latched when
+// the GPS origin was set - no map query, so it answers far from home too
+bool terrainNavGetLatchedHomeHeight(float *heightM)
+{
+    if (!terrainNavUpdateHomeHeight()) {
+        return false;
+    }
+
+    *heightM = homeHeightM;
+    return true;
+}
+
+// terrainNavLookahead() for a route with one turn in it (waypoint missions):
+// the walk follows bearingDeg for turnDistanceM, then turnBearingDeg, and
+// turnExtraRiseM is added to the terrain rise of every sample past the turn
+// (a different minimum height applies there). Same step, same sample limit
+// and the same two slopes as the straight walk
+bool terrainNavLookaheadRoute(float bearingDeg, float distanceM, float climbRatio, float escapeRatio,
+                              float turnDistanceM, float turnBearingDeg, float turnExtraRiseM,
+                              terrainNavLookaheadResult_t *result)
+{
+    if (result == NULL || !terrainNavIsHealthy()) {
+        return false;
+    }
+
+    result->climbNeededM = 0.0f;
+    result->escapeDeficitM = 0.0f;
+    result->samplesTotal = 0;
+    result->samplesMissed = 0;
+
+    gpsLocation_t pos;
+    if (!terrainNavCurrentLocation(&pos)) {
+        return false;
+    }
+    float baseHeightM;
+    if (!terrainNavGetHeightAtLocation(&pos, &baseHeightM)) {
+        return false;
+    }
+
+    float stepNorthM = cosf(bearingDeg * DEG2RAD) * TERRAIN_NAV_STEP_M;
+    float stepEastM = sinf(bearingDeg * DEG2RAD) * TERRAIN_NAV_STEP_M;
+    const float climbPerStepM = climbRatio * TERRAIN_NAV_STEP_M;
+    const float escapePerStepM = escapeRatio * TERRAIN_NAV_STEP_M;
+
+    float achievableClimbM = 0.0f;
+    float escapeClimbM = 0.0f;
+    bool turned = false;
+
+    for (float travelledM = TERRAIN_NAV_STEP_M; travelledM <= distanceM; travelledM += TERRAIN_NAV_STEP_M) {
+        if (result->samplesTotal >= TERRAIN_NAV_LOOKAHEAD_MAX_SAMPLES) {
+            break;
+        }
+
+        if (!turned && travelledM > turnDistanceM) {
+            turned = true;
+            stepNorthM = cosf(turnBearingDeg * DEG2RAD) * TERRAIN_NAV_STEP_M;
+            stepEastM = sinf(turnBearingDeg * DEG2RAD) * TERRAIN_NAV_STEP_M;
+        }
+
+        offsetLatlng(&pos, stepNorthM, stepEastM);
+        achievableClimbM += climbPerStepM;
+        escapeClimbM += escapePerStepM;
+        result->samplesTotal++;
+
+        float heightM;
+        if (terrainNavGetHeightAtLocation(&pos, &heightM)) {
+            const float riseM = heightM - baseHeightM + (turned ? turnExtraRiseM : 0.0f);
+            const float deficitM = riseM - achievableClimbM;
+            if (deficitM > result->climbNeededM) {
+                result->climbNeededM = deficitM;
+            }
+            const float escapeM = riseM - escapeClimbM;
+            if (escapeM > result->escapeDeficitM) {
+                result->escapeDeficitM = escapeM;
+            }
+        } else {
+            result->samplesMissed++;
+        }
+    }
+
+    return true;
+}
+
 #endif

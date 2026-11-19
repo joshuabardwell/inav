@@ -28,7 +28,7 @@ Multirotor **SURFACE** mode follows the ground *reactively* from a physical rang
 - **Looks ahead** along your track (up to 2 km, 1 km by default) with a per-airframe **escape test** — *"at this speed, with your configured climb rate, will you clear what's ahead?"* — and warns you **early, while there's still time**.
 - If the terrain data is lost mid-flight, it **holds the last valid altitude target and warns** on the OSD — it never descends on dead data.
 - The stock 3D Cruise altitude controller is **untouched**; this only feeds it a moving target.
-- **Not used for autonomous navigation.** RTH and waypoint missions do **not** use it yet — the mode yields to them and they fly stock (terrain-blind).
+- **RTH does not use it.** RTH flies stock (terrain-blind). Waypoint missions can use it leg by leg — see *Waypoint missions* below.
 
 ## Setup
 
@@ -79,6 +79,30 @@ The mode narrates itself on the OSD. In plain terms: **TERRAIN AHEAD!** talks ab
 
 > **About `nav_max_altitude`:** that ceiling is **barometric altitude above your Home point** — it is *not* terrain-AGL aware. So over rising ground the terrain can legitimately need more altitude than the ceiling allows; that is exactly when *TERRAIN VS MAX ALT* appears.
 
+## Waypoint missions
+
+*This section describes an addition of this fork; it is not in upstream INAV.*
+
+A waypoint (WAYPOINT or POSHOLD_TIME) can ask for terrain handling on the leg flown **toward** it. The option travels with the mission in `p3`, so it is set per waypoint in the mission planner and needs no mode switch. The TERRAIN AGL HOLD switch plays no part in missions; `terrain_enabled` must be ON.
+
+| Terrain option | What the leg does |
+|---|---|
+| **Off** | Stock: a straight line from the altitude at the start of the leg to the waypoint altitude. |
+| **Floor** | The stock line, except that the altitude target never drops below terrain + minimum + 10 m. Once the terrain allows, the aircraft is back on the stock line. |
+| **Follow** | Holds a set height above the ground for the whole leg: the height the waypoint's stored altitude leaves above the terrain at the waypoint (never less than minimum + 10 m). |
+
+- **Minimum per waypoint.** Each waypoint can carry its own minimum height above ground (50 – 120 m) for its leg; without one the leg uses `terrain_nav_min_agl`.
+- **The look-ahead follows the route.** In a mission the forward scan runs to the waypoint and then along the next leg (when that leg has a terrain option too), using the next leg's minimum there. The aircraft starts climbing before the waypoint for higher ground or a higher minimum after the turn, and does not react to ground straight ahead that the route turns away from.
+- **Stored altitudes stay ordinary altitudes.** Stock firmware, or this firmware without usable terrain data, flies the stock line to the stored altitude. Plan with that in mind: between two waypoints that line can pass through ground the terrain option would have cleared.
+- **No terrain data at the start of a leg** (`terrain_enabled` OFF, no card, no tile): the leg flies stock and the OSD says *TERRAIN NOT READY*.
+- **Terrain data lost during a leg:** the altitude target never drops below the last terrain target (it still follows a higher stock line), the OSD says *TERRAIN LOST - ALT FROZEN*, and the leg resumes after a few seconds of good data.
+- **Follow and the altitude reference.** With a sea-level altitude the held height is altitude minus map terrain at the waypoint, wherever the aircraft took off. With an altitude relative to home it also depends on the terrain height of the actual take-off point, so it shifts if you take off somewhere other than planned.
+- **Tracking lag is unchanged.** The altitude controller trails a rising target by (needed climb rate ÷ `nav_fw_alt_control_response` × 100) metres: 10 m at 4 m/s with the default response of 40. The 10 m margin covers that much; on steeper ground the aircraft sags below the minimum and *TERRAIN! PULL UP!* appears, exactly as in the cruise hold.
+- The OSD messages and `debug_mode = TERRAIN_NAV` work as in cruise. Debug slot 0 adds: bit 3 mission leg with a terrain option, bits 4–5 its option (1 floor, 2 follow), bit 6 follow height known, bit 7 terrain at the waypoint known.
+- Fixed wing only. LAND, RTH and JUMP items never carry a terrain option.
+
+MSP2 command `0x2F02` (`MSP2_INAV_TERRAIN_HEIGHT`) returns the terrain height the SD card map has at up to eight positions, so a planner can check that the card holds the tiles a mission needs. It is refused while armed.
+
 ## Watching it in a log
 
 `set debug_mode = TERRAIN_NAV` publishes the hold's state on the eight debug values (blackbox log and the Configurator's debug view). Otherwise the mode is dormant — nothing is read or computed for it.
@@ -97,7 +121,7 @@ The mode narrates itself on the OSD. In plain terms: **TERRAIN AHEAD!** talks ab
 ## Safety & limitations
 
 - **Fixed-wing only.** It never runs on multirotors, rovers, or boats, and it works **only inside 3D Cruise** (mandatory at this stage).
-- **Not for autonomous navigation yet.** RTH and waypoint missions do not use it — the mode **steps aside cleanly** (hands the aircraft back to stock behaviour) during launch, autoland, emergency landing, RTH, and waypoint missions, and on **GPS loss**. Stock RTH is terrain-blind: it does not follow the ground — **so keep the aircraft in line of sight:** holding a low AGL down the far side of a hill puts terrain between you and the aircraft, the radio and video links drop, and a failsafe RTH whose return altitude is below the ridge heads home *into* the hill. For terrain flights set `nav_rth_alt_mode = MAX`: the aircraft returns at the highest altitude of the whole flight, clearing anything it flew over on the way out, with your held height as margin (it cannot know about high ground you never overflew — on unfamiliar terrain keep extra margin). Or simply: don't fly where you lose line of sight.
+- **RTH does not use it, and missions only where a waypoint asks for it** (see *Waypoint missions*). The mode **steps aside cleanly** (hands the aircraft back to stock behaviour) during launch, autoland, emergency landing, RTH, mission legs without a terrain option, and on **GPS loss**. Stock RTH is terrain-blind: it does not follow the ground — **so keep the aircraft in line of sight:** holding a low AGL down the far side of a hill puts terrain between you and the aircraft, the radio and video links drop, and a failsafe RTH whose return altitude is below the ridge heads home *into* the hill. For terrain flights set `nav_rth_alt_mode = MAX`: the aircraft returns at the highest altitude of the whole flight, clearing anything it flew over on the way out, with your held height as margin (it cannot know about high ground you never overflew — on unfamiliar terrain keep extra margin). Or simply: don't fly where you lose line of sight.
 - The **floor is deliberately high** (default 60 m, minimum 50 m). Terrain data and GPS each carry a few metres of error, so keep clearance in hand — don't set the floor low.
 - **Not a rangefinder replacement.** The value is the ground elevation at your GPS position from the map — it does **not** see trees, buildings, wires, or the actual nearest object below you.
 - **Never stacks with the rangefinder** — it refuses to engage while SURFACE mode is active.
