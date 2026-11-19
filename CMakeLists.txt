@@ -35,6 +35,10 @@ option(COMPILER_VERSION_CHECK "Ensure the compiler matches the expected version"
 include(GetGitRevisionDescription)
 get_git_head_revision(GIT_REFSPEC GIT_SHA1)
 string(SUBSTRING ${GIT_SHA1} 0 8 GIT_REV)
+# Fork builds compile from a copy with no .git: the build script passes the commit in
+if(FORK_GIT_REV)
+    set(GIT_REV ${FORK_GIT_REV})
+endif()
 
 # Load settings related functions, so the tests can use them
 include(dsdlc_generated)
