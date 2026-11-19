@@ -222,6 +222,15 @@ void vtxTableOverlayOsdInfo(vtxDeviceOsdInfo_t *osdInfo)
 {
     const vtxTableConfig_t *config = vtxTableConfig();
 
+    // Power levels and bands fall back to the driver's tables independently
+    if (vtxTableHasPowerLevels()) {
+        if (osdInfo->powerIndex >= 1 && osdInfo->powerIndex <= config->powerLevels) {
+            osdInfo->powerLabel = config->powerLabels[osdInfo->powerIndex - 1];
+        } else {
+            osdInfo->powerLabel = "---";
+        }
+    }
+
     if (!vtxTableHasBands()) {
         return;
     }

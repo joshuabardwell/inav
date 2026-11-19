@@ -95,6 +95,7 @@ typedef struct vtxDeviceOsdInfo_s {
     const char * bandName;
     const char * channelName;
     char powerIndexLetter;
+    const char * powerLabel;    // vtxtable power label (3 chars), NULL when the table has no power levels
 } vtxDeviceOsdInfo_t;
 
 typedef struct vtxDevice_s {

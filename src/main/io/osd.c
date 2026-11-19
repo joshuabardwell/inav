@@ -2738,7 +2738,20 @@ static bool osdDrawSingleElement(uint8_t item)
             osdWriteChar(buff, SYM_VTX_POWER);
             displayWrite(osdDisplayPort, elemPosX, elemPosY, buff);
 
-            osdWriteChar(buff, osdInfo.powerIndexLetter);
+            if (osdInfo.powerLabel) {
+                // vtxtable label, padded to 3 chars so a shorter label clears a longer one
+                // (tfp_sprintf has no precision support, so copy by hand)
+                int i = 0;
+                for (; i < 3 && osdInfo.powerLabel[i]; i++) {
+                    buff[i] = osdInfo.powerLabel[i];
+                }
+                for (; i < 3; i++) {
+                    buff[i] = ' ';
+                }
+                buff[3] = '\0';
+            } else {
+                osdWriteChar(buff, osdInfo.powerIndexLetter);
+            }
             if (isAdjustmentFunctionSelected(ADJUSTMENT_VTX_POWER_LEVEL)) TEXT_ATTRIBUTES_ADD_BLINK(elemAttr);
             displayWriteWithAttr(osdDisplayPort, elemPosX+1, elemPosY, buff, elemAttr);
             return true;

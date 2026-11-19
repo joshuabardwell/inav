@@ -173,6 +173,9 @@ bool vtxCommonGetOsdInfo(vtxDevice_t *vtxDevice, vtxDeviceOsdInfo_t * pOsdInfo)
 {
     bool ret = false;
 
+    // Drivers don't set this; only the vtxtable overlay does
+    pOsdInfo->powerLabel = NULL;
+
     if (vtxDevice && vtxDevice->vTable->getOsdInfo) {
         ret = vtxDevice->vTable->getOsdInfo(vtxDevice, pOsdInfo);
     }
@@ -188,10 +191,11 @@ bool vtxCommonGetOsdInfo(vtxDevice_t *vtxDevice, vtxDeviceOsdInfo_t * pOsdInfo)
         pOsdInfo->bandName = "-";
         pOsdInfo->channelName = "-";
         pOsdInfo->powerIndexLetter = '0';
-    } else {
-        // Drivers fill in names from their built-in tables; a vtxtable takes precedence
-        vtxTableOverlayOsdInfo(pOsdInfo);
     }
+
+    // Drivers fill in names from their built-in tables; a vtxtable takes precedence.
+    // Also applied on failure so a loaded table shows its "unknown" names ("-", "---").
+    vtxTableOverlayOsdInfo(pOsdInfo);
 
     return ret;
 }
