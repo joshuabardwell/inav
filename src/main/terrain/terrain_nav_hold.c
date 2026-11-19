@@ -51,6 +51,7 @@
 
 #include "terrain/terrain_nav.h"
 #include "terrain/terrain_nav_hold.h"
+#include "terrain/terrain_nav_mission.h"
 
 PG_REGISTER_WITH_RESET_TEMPLATE(terrainNavConfig_t, terrainNavConfig, PG_TERRAIN_NAV_CONFIG, 0);
 
@@ -79,8 +80,18 @@ PG_RESET_TEMPLATE(terrainNavConfig_t, terrainNavConfig,
 // horizon than the largest demand ever seen in the logs
 #define TERRAIN_NAV_HOLD_TIME_HORIZON_S 35
 
+// Who is driving the hold core: the cruise hold (mode switch, 3D cruise) or a
+// waypoint mission leg with a terrain mode. Never both - cruise and waypoint
+// navigation are different navigation states
+typedef enum {
+    TERRAIN_NAV_HOLD_SOURCE_NONE = 0,
+    TERRAIN_NAV_HOLD_SOURCE_CRUISE,
+    TERRAIN_NAV_HOLD_SOURCE_MISSION,
+} terrainNavHoldSource_e;
+
 static terrainNavHoldState_t holdState;
 static terrainNavHoldOutput_t holdOutput;
+static terrainNavHoldSource_e holdSource;
 
 // Latest terrain answers, refreshed once per query interval
 static timeMs_t lastQueryTimeMs;
@@ -144,6 +155,14 @@ static void terrainNavHoldRunQueries(timeMs_t currentTimeMs)
     lastQueryTimeMs = currentTimeMs;
 
     queryAglValid = terrainNavGetAGLCm(&queryAglCm);
+
+    // A mission leg may need the terrain height at its waypoint, usually far
+    // from the aircraft. That query takes this cycle's share of the block
+    // cache (C-9), so the look-ahead answer of the previous cycle stands
+    if (holdSource == TERRAIN_NAV_HOLD_SOURCE_MISSION && terrainNavMissionResolveWaypoint(currentTimeMs)) {
+        return;
+    }
+
     queryLookaheadValid = false;
 
     // No course to scan along: lookahead disabled by config, too slow for a
@@ -175,8 +194,12 @@ static void terrainNavHoldRunQueries(timeMs_t currentTimeMs)
 
     const float bearingDeg = CENTIDEGREES_TO_DEGREES((float)posControl.actualState.cog);
 
+    // Cruise scans straight along the course; a mission scans along its route
     terrainNavLookaheadResult_t lookahead;
-    if (terrainNavLookahead(bearingDeg, lookaheadDistM, climbRatio, escapeRatio, &lookahead)) {
+    const bool scanned = (holdSource == TERRAIN_NAV_HOLD_SOURCE_MISSION)
+        ? terrainNavMissionLookahead(lookaheadDistM, climbRatio, escapeRatio, &lookahead)
+        : terrainNavLookahead(bearingDeg, lookaheadDistM, climbRatio, escapeRatio, &lookahead);
+    if (scanned) {
         // A partial answer (samples missed at the far end) is still a valid
         // lower bound; the missed blocks are already scheduled for loading
         queryLookaheadValid = true;
@@ -224,6 +247,8 @@ static void terrainNavHoldPublishDebug(void)
     if (terrainNavHoldGetTargetAglCm(&targetAglCm)) {
         flags |= TERRAIN_NAV_DEBUG_FLAG_ENGAGED;
     }
+    // Bits 3-7: waypoint mission leg (see terrain_nav_mission.h)
+    flags |= (int32_t)terrainNavMissionDebugFlags();
     flags |= (posControl.flags.estPosStatus & 3) << 8;
     flags |= (posControl.flags.estVelStatus & 3) << 10;
     flags |= (posControl.flags.estHeadingStatus & 3) << 12;
@@ -247,11 +272,31 @@ void terrainNavCruiseHoldUpdate(void)
 
     terrainNavHoldInput_t in = { 0 };
     in.nowMs = currentTimeMs;
-    in.eligible = terrainNavHoldEligible();
+
+    // Cruise hold first; otherwise a waypoint leg that asks for a terrain
+    // mode. The mission tracker runs every cycle so that it also notices a
+    // mission ending
+    const bool cruise = terrainNavHoldEligible();
+    const bool missionLeg = terrainNavMissionUpdate(currentTimeMs) && !cruise && !terrainNavHoldMustDisengage();
+    const terrainNavHoldSource_e source = cruise ? TERRAIN_NAV_HOLD_SOURCE_CRUISE
+        : (missionLeg ? TERRAIN_NAV_HOLD_SOURCE_MISSION : TERRAIN_NAV_HOLD_SOURCE_NONE);
+
+    // A new driver, or a new mission leg, starts from a fresh capture: the
+    // floor alarm then treats a higher minimum as a climb in progress, not as
+    // a breach
+    if (source != holdSource || (missionLeg && terrainNavMissionLegChanged())) {
+        terrainNavHoldCoreReset(&holdState);
+        holdSource = source;
+    }
+
+    in.eligible = (source != TERRAIN_NAV_HOLD_SOURCE_NONE);
 
     if (!in.eligible) {
         // Resets the core state; cruise and every other mode fly as stock
         terrainNavHoldCoreUpdate(&holdState, &in, &holdOutput);
+        // A mission leg that is being held off (a disengage condition) must
+        // not keep using targets from before
+        terrainNavMissionStoreOutput(&holdOutput);
         return;
     }
 
@@ -305,6 +350,17 @@ void terrainNavCruiseHoldUpdate(void)
     // Which side holds the unused climb reserve, from the two stock rates
     in.pilotHasMoreClimb = navConfig()->fw.max_manual_climb_rate > navConfig()->fw.max_auto_climb_rate;
     in.autoBeatsManual = navConfig()->fw.max_auto_climb_rate > navConfig()->fw.max_manual_climb_rate;
+
+    if (holdSource == TERRAIN_NAV_HOLD_SOURCE_MISSION) {
+        // The leg's own minimum and the height it asks the hold to keep. The
+        // waypoint state machine stays the only writer of the altitude target
+        // in a mission: it picks the result up through
+        // terrainNavMissionAdjustTargetZ(), so nothing is written from here
+        terrainNavMissionApplyInput(&in);
+        terrainNavHoldCoreUpdate(&holdState, &in, &holdOutput);
+        terrainNavMissionStoreOutput(&holdOutput);
+        return;
+    }
 
     terrainNavHoldCoreUpdate(&holdState, &in, &holdOutput);
 

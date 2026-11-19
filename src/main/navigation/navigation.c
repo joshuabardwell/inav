@@ -64,6 +64,7 @@
 
 #ifdef USE_TERRAIN
 #include "terrain/terrain_nav_hold.h"
+#include "terrain/terrain_nav_mission.h"
 #endif
 
 #include "rx/rx.h"
@@ -3218,6 +3219,12 @@ static navigationFSMEvent_t navOnEnteringState_NAV_STATE_WAYPOINT_IN_PROGRESS(na
                         posControl.wpAltitudeEnforceActive,
                         posControl.activeWaypoint.pos.z,
                         interpolatedAltitude);
+#ifdef USE_TERRAIN
+                    // A waypoint can ask for a terrain floor or terrain following on
+                    // the leg flown to it (fixed wing); every other leg gets its own
+                    // value back
+                    tmpWaypoint.z = terrainNavMissionAdjustTargetZ(tmpWaypoint.z);
+#endif
 
                     setDesiredPosition(&tmpWaypoint, 0, NAV_POS_UPDATE_XY | NAV_POS_UPDATE_Z | NAV_POS_UPDATE_BEARING);
 
@@ -3317,7 +3324,15 @@ static navigationFSMEvent_t navOnEnteringState_NAV_STATE_WAYPOINT_HOLD_TIME(navi
 
     if (navConfig()->general.waypoint_enforce_altitude && !posControl.wpAltitudeReached) {
         // Adjust altitude to waypoint setting
+#ifdef USE_TERRAIN
+        // On a leg with a terrain mode that is the altitude the leg ends at,
+        // which the stored altitude may lie below
+        fpVector3_t altitudeTarget = posControl.activeWaypoint.pos;
+        altitudeTarget.z = terrainNavMissionWaypointZ(altitudeTarget.z);
+        setDesiredPosition(&altitudeTarget, 0, NAV_POS_UPDATE_Z);
+#else
         setDesiredPosition(&posControl.activeWaypoint.pos, 0, NAV_POS_UPDATE_Z);
+#endif
 
         posControl.wpAltitudeReached = isWaypointAltitudeReached();
 
@@ -4558,7 +4573,13 @@ bool isWaypointReached(const fpVector3_t *waypointPos, const int32_t *waypointBe
 
 bool isWaypointAltitudeReached(void)
 {
-    return ABS(navGetCurrentActualPositionAndVelocity()->pos.z - posControl.activeWaypoint.pos.z) < navConfig()->general.waypoint_enforce_altitude;
+#ifdef USE_TERRAIN
+    // A leg with a terrain mode ends at the altitude its mode allows
+    const float waypointZ = terrainNavMissionWaypointZ(posControl.activeWaypoint.pos.z);
+#else
+    const float waypointZ = posControl.activeWaypoint.pos.z;
+#endif
+    return ABS(navGetCurrentActualPositionAndVelocity()->pos.z - waypointZ) < navConfig()->general.waypoint_enforce_altitude;
 }
 
 static void updateHomePositionCompatibility(void)

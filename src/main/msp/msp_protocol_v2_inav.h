@@ -171,3 +171,10 @@
 // MSP_SET_VTXTABLE_BAND (227) and MSP_SET_VTXTABLE_POWERLEVEL (228).
 #define MSP2_INAV_VTXTABLE_CONFIG               0x2F00  //out message  stored vtxtable sizes and limits; payload: U8 bands, U8 channels, U8 powerLevels, U8 maxBands, U8 maxChannels, U8 maxPowerLevels, U8 bandNameLength, U8 powerLabelLength, U16 maxFrequencyMhz
 #define MSP2_INAV_SET_VTXTABLE_CONFIG           0x2F01  //in message   set stored vtxtable sizes; payload: U8 bands, U8 channels, U8 powerLevels, U8 clear (1 = wipe all rows first)
+// in/out message: terrain height from the SD card map at up to 8 points.
+//   request:  n x { I32 lat, I32 lon } (deg * 1e7), n = 0..8
+//   reply:    U8 version (1), U8 flags, U8 block cache size, I16 home terrain height [m], U8 n,
+//             n x { U8 status, I32 height [cm] }
+//   flags:    bit 0 terrain_enabled, bit 1 SD/IO failure, bit 2 healthy, bit 3 home height valid, bit 4 armed
+//   status:   0 height valid, 1 no data (block still loading, or no tile), 2 refused (armed)
+#define MSP2_INAV_TERRAIN_HEIGHT                0x2F02

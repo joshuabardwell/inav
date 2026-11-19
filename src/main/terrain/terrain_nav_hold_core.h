@@ -76,6 +76,8 @@ typedef struct {
     bool lookaheadDegraded;     // lookahead wanted but unavailable for an abnormal reason (heading estimate invalid) - warn the pilot
     int32_t minAglCm;           // configured minimum AGL
     int32_t maxAltCm;           // nav_max_altitude in the same frame, 0 = no ceiling
+    bool commandedAglValid;     // waypoint missions: hold commandedAglCm instead of the AGL captured at engagement
+    int32_t commandedAglCm;     // the height above ground to hold, valid only when commandedAglValid
 } terrainNavHoldInput_t;
 
 typedef struct {

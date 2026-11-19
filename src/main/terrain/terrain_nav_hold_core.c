@@ -276,6 +276,13 @@ static void startCapture(terrainNavHoldState_t *state, const terrainNavHoldInput
 
 static void computeTarget(terrainNavHoldState_t *state, const terrainNavHoldInput_t *in, terrainNavHoldOutput_t *out)
 {
+    // Waypoint missions name the height to hold themselves (the leg's ground
+    // clearance or its floor); cruise leaves this unset and keeps the AGL it
+    // captured at engagement or at the last stick release
+    if (in->commandedAglValid) {
+        state->targetAglCm = in->commandedAglCm;
+    }
+
     // Hold: climb or descend by exactly the difference between the height
     // above ground we have and the one we are holding
     float targetZCm = in->currentZCm + (state->targetAglCm - in->aglCm);
