@@ -963,6 +963,22 @@ static void vtxSASetPitMode(vtxDevice_t *vtxDevice, uint8_t onoff)
     return;
 }
 
+// The frequency the VTX is on, whichever way it was tuned
+static uint16_t saCurrentFreq(void)
+{
+    if (saDevice.mode & SA_MODE_GET_FREQ_BY_FREQ) {
+        return saDevice.freq;
+    }
+
+    // On a built-in channel. V2.0 and later report that channel's frequency. For V1.0, and before
+    // the first status report, use the standard frequencies, as the code without a vtxtable does.
+    if (saDevice.version >= SA_2_0 && saDevice.freq) {
+        return saDevice.freq;
+    }
+
+    return vtx58_Bandchan2Freq(SA_DEVICE_CHVAL_TO_BAND(saDevice.channel) + 1, SA_DEVICE_CHVAL_TO_CHANNEL(saDevice.channel) + 1);
+}
+
 static bool vtxSAGetBandAndChannel(const vtxDevice_t *vtxDevice, uint8_t *pBand, uint8_t *pChannel)
 {
     if (!vtxSAIsReady(vtxDevice)) {
@@ -970,20 +986,19 @@ static bool vtxSAGetBandAndChannel(const vtxDevice_t *vtxDevice, uint8_t *pBand,
     }
 
     if (vtxTableHasBands()) {
-        if (saDevice.mode & SA_MODE_GET_FREQ_BY_FREQ) {
-            // The VTX was tuned by frequency (a CUSTOM band): find that frequency in the table,
-            // preferring the configured band/channel when two entries share it.
-            vtxTableLookupBandChannel(saDevice.freq, vtxSettingsConfig()->band, vtxSettingsConfig()->channel, pBand, pChannel);
-        } else {
+        if (!(saDevice.mode & SA_MODE_GET_FREQ_BY_FREQ)) {
             *pBand = SA_DEVICE_CHVAL_TO_BAND(saDevice.channel) + 1;
             *pChannel = SA_DEVICE_CHVAL_TO_CHANNEL(saDevice.channel) + 1;
-            if (!vtxTableIsFactoryBand(*pBand)) {
-                // The VTX sits on one of its built-in channels, but the table has no FACTORY band
-                // at that position. Report "unknown" so the configured selection is sent again.
-                *pBand = 0;
-                *pChannel = 0;
+            if (vtxTableIsFactoryBand(*pBand)) {
+                return true;
             }
         }
+
+        // The VTX was tuned by frequency (a CUSTOM band), or sits on a built-in channel where the
+        // table has no FACTORY band. Find its frequency in the table, preferring the configured
+        // band/channel when two entries share it. A frequency that is not in the table reports
+        // "unknown" (0, 0), so the configured selection is sent again.
+        vtxTableLookupBandChannel(saCurrentFreq(), vtxSettingsConfig()->band, vtxSettingsConfig()->channel, pBand, pChannel);
         return true;
     }
 
@@ -1027,11 +1042,14 @@ static bool vtxSAGetFreq(const vtxDevice_t *vtxDevice, uint16_t *pFreq)
         return false;
     }
 
-    if (vtxTableHasBands() && !(saDevice.mode & SA_MODE_GET_FREQ_BY_FREQ)) {
-        // Built-in channel: the table says what frequency that is. Fall back to what the VTX reports.
-        const uint16_t tableFreq = vtxTableLookupFrequency(SA_DEVICE_CHVAL_TO_BAND(saDevice.channel) + 1,
-            SA_DEVICE_CHVAL_TO_CHANNEL(saDevice.channel) + 1);
-        *pFreq = tableFreq ? tableFreq : saDevice.freq;
+    if (vtxTableHasBands()) {
+        const uint8_t band = SA_DEVICE_CHVAL_TO_BAND(saDevice.channel) + 1;
+        uint16_t tableFreq = 0;
+        if (!(saDevice.mode & SA_MODE_GET_FREQ_BY_FREQ) && vtxTableIsFactoryBand(band)) {
+            // Built-in channel with a FACTORY band at that position: the table says what frequency that is
+            tableFreq = vtxTableLookupFrequency(band, SA_DEVICE_CHVAL_TO_CHANNEL(saDevice.channel) + 1);
+        }
+        *pFreq = tableFreq ? tableFreq : saCurrentFreq();
         return true;
     }
 

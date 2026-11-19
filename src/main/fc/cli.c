@@ -4703,6 +4703,13 @@ static void cliStatus(char *cmdline)
         if (osdInfo.frequency) {
             cliPrintf(", freq: %d MHz", osdInfo.frequency);
         }
+
+#ifdef USE_VTX_TABLE
+        if (vtxTableHasBands() && !osdInfo.band) {
+            // Explains the "-" above: the VTX is on a frequency the table does not list
+            cliPrint(" (not in vtxtable)");
+        }
+#endif
     }
     else {
         cliPrint("not detected");
