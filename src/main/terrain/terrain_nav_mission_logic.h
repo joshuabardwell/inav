@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -175,4 +176,125 @@ static inline float terrainNavMissionTurnExtraRiseM(int32_t minAglCm, int32_t ne
         extraCm += (float)marginCm;
     }
     return extraCm * 0.01f;
+}
+
+/*
+ * The path the mission look-ahead scans (terrainNavLookaheadRoute).
+ *
+ * It starts at the aircraft on its course over ground and turns toward the active
+ * waypoint no tighter than the radius the aircraft plans its turns for, so a turn the
+ * aircraft is still flying - after a fly-by waypoint switch, or any correction back onto
+ * the route - is scanned where it will be flown, not along a straight line to the
+ * waypoint. Once the path reaches the waypoint it turns onto the next leg at once, as
+ * the route look-ahead always has. With the course already pointing at the waypoint the
+ * path is that straight line, sample for sample.
+ *
+ * A path of any shape crosses block boundaries no faster per metre than the worst
+ * straight bearing (sqrt(1/720^2 + 1/840^2) per metre), so the per-cycle block budget of
+ * the straight scan holds for it unchanged.
+ */
+
+// The scan's step: TERRAIN_NAV_STEP_M of terrain_nav.c, the grid spacing
+#define TERRAIN_NAV_MISSION_PATH_STEP_M         30.0f
+// Below one step the turn is as tight as the scan can draw it
+#define TERRAIN_NAV_MISSION_TURN_RADIUS_MIN_M   30.0f
+// A step whose course still differs from the wanted one by more than this is flown banked
+#define TERRAIN_NAV_MISSION_TURNING_DEG         10.0f
+// While banked in a turn the aircraft climbs worse: the achievable climb of a turning
+// step is this fraction of the usual (HITL 2026-11-23: about 5 m/s in a 55 degree bank,
+// 11-16 m/s once level)
+#define TERRAIN_NAV_MISSION_TURN_CLIMB_FACTOR   0.5f
+
+// Radius of the turn the scan draws, in metres: v^2 / (g tan(bank)) at the ground speed,
+// for the bank angle the aircraft plans its turns for (nav_fw_bank_angle)
+static inline float terrainNavMissionTurnRadiusM(float groundSpeedCmS, float bankDeg)
+{
+    const float speedMS = groundSpeedCmS * 0.01f;
+    const float tanBank = tanf(bankDeg * 0.017453293f);
+    if (!(tanBank > 0.01f)) {
+        return 1.0e6f;      // no usable bank: as good as straight
+    }
+    const float radiusM = speedMS * speedMS / (9.80665f * tanBank);
+    return (radiusM > TERRAIN_NAV_MISSION_TURN_RADIUS_MIN_M) ? radiusM : TERRAIN_NAV_MISSION_TURN_RADIUS_MIN_M;
+}
+
+static inline float terrainNavMissionWrap180(float deg)
+{
+    while (deg > 180.0f) {
+        deg -= 360.0f;
+    }
+    while (deg <= -180.0f) {
+        deg += 360.0f;
+    }
+    return deg;
+}
+
+typedef struct {
+    float wpNorthM;             // the active waypoint, from where the path starts
+    float wpEastM;
+    float maxTurnDeg;           // most the course may change in one step
+    bool nextLegValid;          // the path continues past the waypoint
+    float nextBearingDeg;       // course of the next leg
+} terrainNavMissionPath_t;
+
+typedef struct {
+    float northM;               // the last sample, from where the path starts
+    float eastM;
+    float courseDeg;
+    bool pastWaypoint;          // on the next leg
+    bool turning;               // the last step was flown banked
+} terrainNavMissionPathState_t;
+
+static inline void terrainNavMissionPathStart(terrainNavMissionPathState_t *state, float courseDeg)
+{
+    state->northM = 0.0f;
+    state->eastM = 0.0f;
+    state->courseDeg = courseDeg;
+    state->pastWaypoint = false;
+    state->turning = false;
+}
+
+// Moves the path one step on. Returns false, without moving, when the path ends at the
+// waypoint (no next leg to follow). *stepNorthM, *stepEastM: the move
+static inline bool terrainNavMissionPathStep(terrainNavMissionPathState_t *state, const terrainNavMissionPath_t *path,
+                                             float *stepNorthM, float *stepEastM)
+{
+    state->turning = false;
+
+    if (!state->pastWaypoint) {
+        const float toWpNorthM = path->wpNorthM - state->northM;
+        const float toWpEastM = path->wpEastM - state->eastM;
+        if (toWpNorthM * toWpNorthM + toWpEastM * toWpEastM < TERRAIN_NAV_MISSION_PATH_STEP_M * TERRAIN_NAV_MISSION_PATH_STEP_M) {
+            // Less than one step from the waypoint
+            if (!path->nextLegValid) {
+                return false;
+            }
+            state->pastWaypoint = true;
+            state->courseDeg = path->nextBearingDeg;
+        } else {
+            const float wantDeg = atan2f(toWpEastM, toWpNorthM) * 57.29578f;
+            const float errorDeg = terrainNavMissionWrap180(wantDeg - state->courseDeg);
+            float turnDeg = errorDeg;
+            if (turnDeg > path->maxTurnDeg) {
+                turnDeg = path->maxTurnDeg;
+            } else if (turnDeg < -path->maxTurnDeg) {
+                turnDeg = -path->maxTurnDeg;
+            }
+            state->turning = fabsf(errorDeg) > TERRAIN_NAV_MISSION_TURNING_DEG;
+            state->courseDeg = terrainNavMissionWrap180(state->courseDeg + turnDeg);
+        }
+    }
+
+    const float courseRad = state->courseDeg * 0.017453293f;
+    *stepNorthM = cosf(courseRad) * TERRAIN_NAV_MISSION_PATH_STEP_M;
+    *stepEastM = sinf(courseRad) * TERRAIN_NAV_MISSION_PATH_STEP_M;
+    state->northM += *stepNorthM;
+    state->eastM += *stepEastM;
+    return true;
+}
+
+// Most the scan's course may change in one step for a turn of radiusM
+static inline float terrainNavMissionMaxTurnPerStepDeg(float radiusM)
+{
+    return TERRAIN_NAV_MISSION_PATH_STEP_M / radiusM * 57.29578f;
 }

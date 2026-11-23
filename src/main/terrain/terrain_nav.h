@@ -29,6 +29,8 @@
 
 #include "io/gps.h"
 
+#include "terrain/terrain_nav_mission_logic.h"
+
 /*
  * Navigation-facing terrain API.
  *
@@ -68,11 +70,14 @@ bool terrainNavGetHomeTerrainHeight(float *heightM);
 // full-capability escape test) - same samples, no extra SD load
 bool terrainNavLookahead(float bearingDeg, float distanceM, float climbRatio, float escapeRatio, terrainNavLookaheadResult_t *result);
 
-// The same walk for a route with one turn (waypoint missions): bearingDeg for
-// turnDistanceM, then turnBearingDeg; turnExtraRiseM is added to the terrain
-// rise of the samples past the turn
-bool terrainNavLookaheadRoute(float bearingDeg, float distanceM, float climbRatio, float escapeRatio,
-                              float turnDistanceM, float turnBearingDeg, float turnExtraRiseM,
+// The same walk along a waypoint mission's route (terrain_nav_mission_logic.h):
+// from courseDeg, turning toward the waypoint at most path->maxTurnDeg per step,
+// then along the next leg, where nextExtraRiseM is added to the terrain rise.
+// On a turning step the achievable climb grows by only
+// TERRAIN_NAV_MISSION_TURN_CLIMB_FACTOR of climbRatio; the escape slope is
+// never reduced
+bool terrainNavLookaheadRoute(const terrainNavMissionPath_t *path, float courseDeg, float distanceM,
+                              float climbRatio, float escapeRatio, float nextExtraRiseM,
                               terrainNavLookaheadResult_t *result);
 
 // Home terrain height as latched when the GPS origin was set (no map query)

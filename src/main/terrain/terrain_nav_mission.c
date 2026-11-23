@@ -269,23 +269,33 @@ bool terrainNavMissionResolveWaypoint(timeMs_t currentTimeMs)
     return true;
 }
 
-bool terrainNavMissionLookahead(float distanceM, float climbRatio, float escapeRatio, terrainNavLookaheadResult_t *result)
+bool terrainNavMissionLookahead(float distanceM, float groundSpeedCmS, float climbRatio, float escapeRatio, terrainNavLookaheadResult_t *result)
 {
-    const float bearingDeg = CENTIDEGREES_TO_DEGREES((float)calculateBearingToDestination(&posControl.activeWaypoint.pos));
-    const float toWaypointM = CENTIMETERS_TO_METERS(posControl.wpDistance);
+    const fpVector3_t *here = &navGetCurrentActualPositionAndVelocity()->pos;
 
-    if (!mission.nextLegValid) {
-        // What lies past the waypoint is not a terrain leg (a stock leg, a
-        // landing, RTH, a jump, the end of the mission): the scan stops at
-        // the waypoint and never reacts to ground the route does not cross
-        return terrainNavLookaheadRoute(bearingDeg, MIN(distanceM, toWaypointM), climbRatio, escapeRatio,
-                                        toWaypointM, bearingDeg, 0.0f, result);
-    }
+    // The scan starts on the course over ground and turns toward the waypoint
+    // at the radius the aircraft plans its turns for, so the turn it is still
+    // flying after a fly-by switch is scanned where it will be flown
+    terrainNavMissionPath_t path;
+    // (CENTIMETERS_TO_METERS does not bracket its argument: take the difference first)
+    const float toWpNorthCm = posControl.activeWaypoint.pos.x - here->x;
+    const float toWpEastCm = posControl.activeWaypoint.pos.y - here->y;
+    path.wpNorthM = CENTIMETERS_TO_METERS(toWpNorthCm);
+    path.wpEastM = CENTIMETERS_TO_METERS(toWpEastCm);
+    path.maxTurnDeg = terrainNavMissionMaxTurnPerStepDeg(
+        terrainNavMissionTurnRadiusM(groundSpeedCmS, (float)navConfig()->fw.max_bank_angle));
+    // What lies past the waypoint may not be a terrain leg (a stock leg, a
+    // landing, RTH, a jump, the end of the mission): then the scan stops at
+    // the waypoint and never reacts to ground the route does not cross
+    path.nextLegValid = mission.nextLegValid;
+    path.nextBearingDeg = mission.nextBearingDeg;
 
-    return terrainNavLookaheadRoute(bearingDeg, distanceM, climbRatio, escapeRatio,
-                                    toWaypointM, mission.nextBearingDeg,
-                                    terrainNavMissionTurnExtraRiseM(mission.minAglCm, mission.nextMinAglCm, TERRAIN_NAV_HOLD_RECOVER_MARGIN_CM),
-                                    result);
+    const float nextExtraRiseM = mission.nextLegValid
+        ? terrainNavMissionTurnExtraRiseM(mission.minAglCm, mission.nextMinAglCm, TERRAIN_NAV_HOLD_RECOVER_MARGIN_CM)
+        : 0.0f;
+
+    return terrainNavLookaheadRoute(&path, CENTIDEGREES_TO_DEGREES((float)posControl.actualState.cog), distanceM,
+                                    climbRatio, escapeRatio, nextExtraRiseM, result);
 }
 
 static int32_t commandedAglCm(void)
