@@ -6263,6 +6263,9 @@ textAttributes_t osdGetSystemMessage(char *buff, size_t buff_size, bool isCenter
 
             if (FLIGHT_MODE(FAILSAFE_MODE) || FLIGHT_MODE(NAV_RTH_MODE) || FLIGHT_MODE(NAV_WP_MODE) || navigationIsExecutingAnEmergencyLanding()) {
                 /* ADDS MAXIMUM OF 3 MESSAGES TO TOTAL NORMALLY, 5 MESSAGES DURING FAILSAFE */
+#ifdef USE_TERRAIN
+                const unsigned waypointMessageAt = messageCount;
+#endif
                 if (navGetCurrentStateFlags() & NAV_AUTO_WP_DONE) {
                     ADD_MSG(STATE(LANDING_DETECTED) ? OSD_MESSAGE_STR(OSD_MSG_WP_LANDED) : OSD_MESSAGE_STR(OSD_MSG_WP_FINISHED));
                 } else if (NAV_Status.state == MW_NAV_STATE_WP_ENROUTE) {
@@ -6299,6 +6302,13 @@ textAttributes_t osdGetSystemMessage(char *buff, size_t buff_size, bool isCenter
                 if (FLIGHT_MODE(NAV_WP_MODE) && !FLIGHT_MODE(FAILSAFE_MODE)) {
                     const char *terrainMessages[2];
                     const unsigned terrainMessageCount = osdTerrainNavMessages(terrainMessages, &terrainUrgentMessage);
+                    if (terrainUrgentMessage) {
+                        /* A floor alarm (PULL UP, TURN AWAY) takes the place of the
+                         * waypoint message above ("TO WP n/m", the hold countdown): the
+                         * line then shows the alarm, alternating only with the
+                         * auto-climb info, not a third of the time behind progress text */
+                        messageCount = waypointMessageAt;
+                    }
                     for (unsigned ii = 0; ii < terrainMessageCount; ii++) {
                         ADD_MSG(terrainMessages[ii]);
                     }
