@@ -540,6 +540,11 @@ static float getFwPlanningBankDeg(void)
     return MIN((float)navConfig()->fw.max_bank_angle, getFwEffectiveBankLimit());
 }
 
+float navFwGetPlanningBankDeg(void)
+{
+    return getFwPlanningBankDeg();
+}
+
 // Roll-command bank limit [deg]: an active arc may use the reserve up to the ceiling to hold its radius in wind
 static float getFwControlBankLimit(void)
 {

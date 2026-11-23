@@ -772,6 +772,9 @@ void selectMultiMissionIndex(int8_t increment);
 #endif
 float getFinalRTHAltitude(void);
 int16_t fixedWingPitchToThrottleCorrection(int16_t pitch, timeUs_t currentTimeUs);
+// The bank [deg] the fixed-wing controller sizes its turns for: nav_fw_bank_angle capped by
+// max_angle_inclination_rll and the energy guard (the terrain look-ahead draws turns with it)
+float navFwGetPlanningBankDeg(void);
 
 /* Geodetic functions */
 typedef enum {
