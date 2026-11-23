@@ -63,9 +63,10 @@ bool terrainNavMissionLegChanged(void);
 // and does not have it yet. True when a query was made this cycle
 bool terrainNavMissionResolveWaypoint(timeMs_t currentTimeMs);
 
-// The look-ahead along the mission route: to the waypoint, then along the
+// The look-ahead along the mission route: from the course over ground, turning
+// toward the waypoint as the aircraft will at this ground speed, then along the
 // next leg when that is a terrain leg too, with the next leg's minimum
-bool terrainNavMissionLookahead(float distanceM, float climbRatio, float escapeRatio, terrainNavLookaheadResult_t *result);
+bool terrainNavMissionLookahead(float distanceM, float groundSpeedCmS, float climbRatio, float escapeRatio, terrainNavLookaheadResult_t *result);
 
 // Fills the mission-specific inputs of the hold core
 void terrainNavMissionApplyInput(terrainNavHoldInput_t *in);

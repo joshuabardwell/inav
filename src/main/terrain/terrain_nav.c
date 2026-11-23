@@ -222,13 +222,15 @@ bool terrainNavGetLatchedHomeHeight(float *heightM)
     return true;
 }
 
-// terrainNavLookahead() for a route with one turn in it (waypoint missions):
-// the walk follows bearingDeg for turnDistanceM, then turnBearingDeg, and
-// turnExtraRiseM is added to the terrain rise of every sample past the turn
-// (a different minimum height applies there). Same step, same sample limit
-// and the same two slopes as the straight walk
-bool terrainNavLookaheadRoute(float bearingDeg, float distanceM, float climbRatio, float escapeRatio,
-                              float turnDistanceM, float turnBearingDeg, float turnExtraRiseM,
+// terrainNavLookahead() along a waypoint mission's route: the path of
+// terrain_nav_mission_logic.h, which starts on the course over ground, turns
+// toward the waypoint the way the aircraft will, and follows the next leg past
+// it. nextExtraRiseM is added to the terrain rise of every sample on the next
+// leg (a different minimum height applies there). Same step, same sample limit
+// and the same two slopes as the straight walk, except that a turning step
+// adds less achievable climb: a banked aircraft climbs worse
+bool terrainNavLookaheadRoute(const terrainNavMissionPath_t *path, float courseDeg, float distanceM,
+                              float climbRatio, float escapeRatio, float nextExtraRiseM,
                               terrainNavLookaheadResult_t *result)
 {
     if (result == NULL || !terrainNavIsHealthy()) {
@@ -249,34 +251,34 @@ bool terrainNavLookaheadRoute(float bearingDeg, float distanceM, float climbRati
         return false;
     }
 
-    float stepNorthM = cosf(bearingDeg * DEG2RAD) * TERRAIN_NAV_STEP_M;
-    float stepEastM = sinf(bearingDeg * DEG2RAD) * TERRAIN_NAV_STEP_M;
     const float climbPerStepM = climbRatio * TERRAIN_NAV_STEP_M;
     const float escapePerStepM = escapeRatio * TERRAIN_NAV_STEP_M;
 
     float achievableClimbM = 0.0f;
     float escapeClimbM = 0.0f;
-    bool turned = false;
+
+    terrainNavMissionPathState_t walk;
+    terrainNavMissionPathStart(&walk, courseDeg);
 
     for (float travelledM = TERRAIN_NAV_STEP_M; travelledM <= distanceM; travelledM += TERRAIN_NAV_STEP_M) {
         if (result->samplesTotal >= TERRAIN_NAV_LOOKAHEAD_MAX_SAMPLES) {
             break;
         }
 
-        if (!turned && travelledM > turnDistanceM) {
-            turned = true;
-            stepNorthM = cosf(turnBearingDeg * DEG2RAD) * TERRAIN_NAV_STEP_M;
-            stepEastM = sinf(turnBearingDeg * DEG2RAD) * TERRAIN_NAV_STEP_M;
+        float stepNorthM;
+        float stepEastM;
+        if (!terrainNavMissionPathStep(&walk, path, &stepNorthM, &stepEastM)) {
+            break;      // the route ends at the waypoint
         }
 
         offsetLatlng(&pos, stepNorthM, stepEastM);
-        achievableClimbM += climbPerStepM;
+        achievableClimbM += walk.turning ? climbPerStepM * TERRAIN_NAV_MISSION_TURN_CLIMB_FACTOR : climbPerStepM;
         escapeClimbM += escapePerStepM;
         result->samplesTotal++;
 
         float heightM;
         if (terrainNavGetHeightAtLocation(&pos, &heightM)) {
-            const float riseM = heightM - baseHeightM + (turned ? turnExtraRiseM : 0.0f);
+            const float riseM = heightM - baseHeightM + (walk.pastWaypoint ? nextExtraRiseM : 0.0f);
             const float deficitM = riseM - achievableClimbM;
             if (deficitM > result->climbNeededM) {
                 result->climbNeededM = deficitM;

@@ -64,9 +64,10 @@ PG_RESET_TEMPLATE(terrainNavConfig_t, terrainNavConfig,
 // per query cycle (the cache starves when a cycle exceeds it - C-9)
 #define TERRAIN_NAV_HOLD_QUERY_INTERVAL_MS 100
 
-// Worst-case meters of straight flight per newly touched cache block: block
-// stride is 720 x 840 m ground (24 x 28 points at 30 m), the worst bearing
-// crosses a block boundary every 1/sqrt(1/720^2 + 1/840^2) = 546 m
+// Worst-case meters of flight per newly touched cache block: block stride is
+// 720 x 840 m ground (24 x 28 points at 30 m), the worst bearing crosses a
+// block boundary every 1/sqrt(1/720^2 + 1/840^2) = 546 m. A curved path (the
+// mission scan through a turn) crosses them no faster per metre
 #define TERRAIN_NAV_HOLD_M_PER_BLOCK_WORST 540
 
 // Below this ground speed the course over ground is too noisy for a lookahead
@@ -197,7 +198,7 @@ static void terrainNavHoldRunQueries(timeMs_t currentTimeMs)
     // Cruise scans straight along the course; a mission scans along its route
     terrainNavLookaheadResult_t lookahead;
     const bool scanned = (holdSource == TERRAIN_NAV_HOLD_SOURCE_MISSION)
-        ? terrainNavMissionLookahead(lookaheadDistM, climbRatio, escapeRatio, &lookahead)
+        ? terrainNavMissionLookahead(lookaheadDistM, groundSpeedCmS, climbRatio, escapeRatio, &lookahead)
         : terrainNavLookahead(bearingDeg, lookaheadDistM, climbRatio, escapeRatio, &lookahead);
     if (scanned) {
         // A partial answer (samples missed at the far end) is still a valid
