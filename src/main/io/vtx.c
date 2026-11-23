@@ -164,11 +164,18 @@ void vtxUpdate(timeUs_t currentTimeUs)
 {
     static uint8_t currentSchedule = 0;
 
+    vtxDevice_t *vtxDevice = vtxCommonDevice();
+
     if (cliMode) {
+        // Settings changed in the CLI wait for `save`, so nothing is applied while it is open.
+        // The device is still serviced: it keeps being polled, and `status` and the OSD show
+        // its live state instead of a VTX that stopped answering.
+        if (vtxDevice) {
+            vtxCommonProcess(vtxDevice, currentTimeUs);
+        }
         return;
     }
 
-    vtxDevice_t *vtxDevice = vtxCommonDevice();
     if (vtxDevice) {
         // Check input sources for config updates
         vtxControlInputPoll();
