@@ -6183,6 +6183,54 @@ timeMs_t systemMessageCycleTime(unsigned messageCount, const char **messages){
     return osdConfig()->system_msg_display_time * factor;
 }
 
+#ifdef USE_TERRAIN
+/* The terrain hold's messages, at most 2: the worst warning, and - while the
+ * hold is actually climbing to the minimum - the auto-climb info alternating
+ * beneath it, so the pilot always sees both the danger and the action being
+ * taken. *urgent is set to the message that has to blink (the floor warnings) */
+static unsigned osdTerrainNavMessages(const char *messages[2], const char **urgent)
+{
+    unsigned count = 0;
+
+    switch (terrainNavHoldGetWarning()) {
+        case TERRAIN_NAV_HOLD_WARN_NOT_READY:
+            messages[count++] = OSD_MESSAGE_STR(OSD_MSG_TERRAIN_NOT_READY);
+            break;
+        case TERRAIN_NAV_HOLD_WARN_DATA_LOST:
+            messages[count++] = OSD_MESSAGE_STR(OSD_MSG_TERRAIN_DATA_LOST);
+            break;
+        case TERRAIN_NAV_HOLD_WARN_MAX_ALT:
+            messages[count++] = OSD_MESSAGE_STR(OSD_MSG_TERRAIN_VS_MAX_ALT);
+            break;
+        case TERRAIN_NAV_HOLD_WARN_PULL_UP:
+            messages[count++] = OSD_MESSAGE_STR(OSD_MSG_TERRAIN_PULL_UP);
+            *urgent = messages[count - 1];
+            break;
+        case TERRAIN_NAV_HOLD_WARN_TURN_AWAY:
+            messages[count++] = OSD_MESSAGE_STR(OSD_MSG_TERRAIN_TURN_AWAY);
+            *urgent = messages[count - 1];
+            break;
+        case TERRAIN_NAV_HOLD_WARN_NO_HEADING:
+            messages[count++] = OSD_MESSAGE_STR(OSD_MSG_TERRAIN_NO_HEADING);
+            break;
+        case TERRAIN_NAV_HOLD_WARN_AUTO_CLIMB:
+            messages[count++] = OSD_MESSAGE_STR(OSD_MSG_TERRAIN_AUTO_CLIMB);
+            break;
+        case TERRAIN_NAV_HOLD_WARN_TERRAIN_AHEAD:
+            messages[count++] = OSD_MESSAGE_STR(OSD_MSG_TERRAIN_AHEAD);
+            break;
+        case TERRAIN_NAV_HOLD_WARN_NONE:
+            break;
+    }
+    if (terrainNavHoldAutoClimbRunning()
+            && terrainNavHoldGetWarning() != TERRAIN_NAV_HOLD_WARN_AUTO_CLIMB
+            && terrainNavHoldGetWarning() != TERRAIN_NAV_HOLD_WARN_NONE) {
+        messages[count++] = OSD_MESSAGE_STR(OSD_MSG_TERRAIN_AUTO_CLIMB);
+    }
+    return count;
+}
+#endif
+
 textAttributes_t osdGetSystemMessage(char *buff, size_t buff_size, bool isCenteredText)
 {
     textAttributes_t elemAttr = TEXT_ATTRIBUTES_NONE;
@@ -6243,6 +6291,19 @@ textAttributes_t osdGetSystemMessage(char *buff, size_t buff_size, bool isCenter
                         ADD_MSG(navStateMessage);
                     }
                 }
+#ifdef USE_TERRAIN
+                /* A waypoint leg with a terrain mode runs the terrain hold too: its
+                 * warnings belong on screen here as they do in cruise. Outside such a
+                 * leg (RTH, failsafe, a stock leg) the hold is off and has none.
+                 * ADDS MAXIMUM OF 2 MESSAGES TO TOTAL */
+                if (FLIGHT_MODE(NAV_WP_MODE) && !FLIGHT_MODE(FAILSAFE_MODE)) {
+                    const char *terrainMessages[2];
+                    const unsigned terrainMessageCount = osdTerrainNavMessages(terrainMessages, &terrainUrgentMessage);
+                    for (unsigned ii = 0; ii < terrainMessageCount; ii++) {
+                        ADD_MSG(terrainMessages[ii]);
+                    }
+                }
+#endif
 #if defined(USE_SAFE_HOME)
                 const char *safehomeMessage = divertingToSafehomeMessage();
                 if (safehomeMessage) {
@@ -6340,48 +6401,12 @@ textAttributes_t osdGetSystemMessage(char *buff, size_t buff_size, bool isCenter
                 }
 #endif
 #ifdef USE_TERRAIN
-                /* ADDS MAXIMUM OF 2 MESSAGES TO TOTAL: the worst warning, and -
-                 * while the hold is actually climbing to the minimum - the
-                 * auto-climb info alternating beneath it, so the pilot always
-                 * sees both the danger and the action being taken */
-                switch (terrainNavHoldGetWarning()) {
-                    case TERRAIN_NAV_HOLD_WARN_NOT_READY:
-                        ADD_MSG(OSD_MESSAGE_STR(OSD_MSG_TERRAIN_NOT_READY));
-                        break;
-                    case TERRAIN_NAV_HOLD_WARN_DATA_LOST:
-                        ADD_MSG(OSD_MESSAGE_STR(OSD_MSG_TERRAIN_DATA_LOST));
-                        break;
-                    case TERRAIN_NAV_HOLD_WARN_MAX_ALT:
-                        ADD_MSG(OSD_MESSAGE_STR(OSD_MSG_TERRAIN_VS_MAX_ALT));
-                        break;
-                    case TERRAIN_NAV_HOLD_WARN_PULL_UP:
-                        ADD_MSG(OSD_MESSAGE_STR(OSD_MSG_TERRAIN_PULL_UP));
-                        if (messageCount) {
-                            terrainUrgentMessage = messages[messageCount - 1];
-                        }
-                        break;
-                    case TERRAIN_NAV_HOLD_WARN_TURN_AWAY:
-                        ADD_MSG(OSD_MESSAGE_STR(OSD_MSG_TERRAIN_TURN_AWAY));
-                        if (messageCount) {
-                            terrainUrgentMessage = messages[messageCount - 1];
-                        }
-                        break;
-                    case TERRAIN_NAV_HOLD_WARN_NO_HEADING:
-                        ADD_MSG(OSD_MESSAGE_STR(OSD_MSG_TERRAIN_NO_HEADING));
-                        break;
-                    case TERRAIN_NAV_HOLD_WARN_AUTO_CLIMB:
-                        ADD_MSG(OSD_MESSAGE_STR(OSD_MSG_TERRAIN_AUTO_CLIMB));
-                        break;
-                    case TERRAIN_NAV_HOLD_WARN_TERRAIN_AHEAD:
-                        ADD_MSG(OSD_MESSAGE_STR(OSD_MSG_TERRAIN_AHEAD));
-                        break;
-                    case TERRAIN_NAV_HOLD_WARN_NONE:
-                        break;
-                }
-                if (terrainNavHoldAutoClimbRunning()
-                        && terrainNavHoldGetWarning() != TERRAIN_NAV_HOLD_WARN_AUTO_CLIMB
-                        && terrainNavHoldGetWarning() != TERRAIN_NAV_HOLD_WARN_NONE) {
-                    ADD_MSG(OSD_MESSAGE_STR(OSD_MSG_TERRAIN_AUTO_CLIMB));
+                {   /* ADDS MAXIMUM OF 2 MESSAGES TO TOTAL */
+                    const char *terrainMessages[2];
+                    const unsigned terrainMessageCount = osdTerrainNavMessages(terrainMessages, &terrainUrgentMessage);
+                    for (unsigned ii = 0; ii < terrainMessageCount; ii++) {
+                        ADD_MSG(terrainMessages[ii]);
+                    }
                 }
 #endif
                 if (STATE(AIRPLANE)) {      /* ADDS MAXIMUM OF 3 MESSAGES TO TOTAL */

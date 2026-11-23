@@ -76,7 +76,8 @@ typedef struct {
     timeMs_t wpQueryNextMs;
 
     bool nextLegValid;          // the leg after this one is a terrain leg too
-    float nextBearingDeg;
+    float nextNorthCm;          // its waypoint, in the local frame
+    float nextEastCm;
     int32_t nextMinAglCm;
 
     bool legChanged;            // set for the one cycle in which the leg changed
@@ -160,12 +161,8 @@ static void setUpNextLeg(const navWaypoint_t *wp)
         return;
     }
 
-    float bearingDeg = RADIANS_TO_DEGREES(atan2f(deltaEast, deltaNorth));
-    if (bearingDeg < 0.0f) {
-        bearingDeg += 360.0f;
-    }
-
-    mission.nextBearingDeg = bearingDeg;
+    mission.nextNorthCm = nextPos.x;
+    mission.nextEastCm = nextPos.y;
     mission.nextMinAglCm = terrainNavMissionMinAglCm(nextHasOptions, next->p3, terrainNavConfig()->minAglCm);
     mission.nextLegValid = true;
 }
@@ -273,28 +270,43 @@ bool terrainNavMissionLookahead(float distanceM, float groundSpeedCmS, float cli
 {
     const fpVector3_t *here = &navGetCurrentActualPositionAndVelocity()->pos;
 
-    // The scan starts on the course over ground and turns toward the waypoint
-    // at the radius the aircraft plans its turns for, so the turn it is still
-    // flying after a fly-by switch is scanned where it will be flown
+    // The scan is a band of lanes (terrain_nav_mission_logic.h). They start on the
+    // course over ground and turn toward the waypoint, the tightest at the bank the
+    // navigation controller plans its turns for right now (nav_fw_bank_angle under
+    // max_angle_inclination_rll and the energy guard), the widest at half of it
+    const float planningBankDeg = navFwGetPlanningBankDeg();
+    terrainNavBand_t band;
+    terrainNavBandFromBank(groundSpeedCmS, planningBankDeg, &band);
+
     terrainNavMissionPath_t path;
     // (CENTIMETERS_TO_METERS does not bracket its argument: take the difference first)
     const float toWpNorthCm = posControl.activeWaypoint.pos.x - here->x;
     const float toWpEastCm = posControl.activeWaypoint.pos.y - here->y;
     path.wpNorthM = CENTIMETERS_TO_METERS(toWpNorthCm);
     path.wpEastM = CENTIMETERS_TO_METERS(toWpEastCm);
-    path.maxTurnDeg = terrainNavMissionMaxTurnPerStepDeg(
-        terrainNavMissionTurnRadiusM(groundSpeedCmS, (float)navConfig()->fw.max_bank_angle));
     // What lies past the waypoint may not be a terrain leg (a stock leg, a
     // landing, RTH, a jump, the end of the mission): then the scan stops at
     // the waypoint and never reacts to ground the route does not cross
     path.nextLegValid = mission.nextLegValid;
-    path.nextBearingDeg = mission.nextBearingDeg;
+    const float toNextNorthCm = mission.nextNorthCm - here->x;
+    const float toNextEastCm = mission.nextEastCm - here->y;
+    path.nextWpNorthM = CENTIMETERS_TO_METERS(toNextNorthCm);
+    path.nextWpEastM = CENTIMETERS_TO_METERS(toNextEastCm);
+    // The lanes leave for the next waypoint where the controller will switch to it: the
+    // fly-by lead before the waypoint. A waypoint the aircraft holds at is flown to
+    const bool flyBy = navConfig()->fw.wp_turn_mode == NAV_FW_WP_TURN_COORD_FLY_BY
+        && mission.action != NAV_WP_ACTION_HOLD_TIME
+        && posControl.activeWaypoint.nextTurnAngle != -1;
+    path.switchDistM = terrainNavMissionSwitchDistM(flyBy, CENTIDEGREES_TO_DEGREES((float)posControl.activeWaypoint.nextTurnAngle),
+                                                    terrainNavMissionTurnRadiusM(groundSpeedCmS, planningBankDeg), groundSpeedCmS,
+                                                    (float)navConfig()->fw.wp_turn_max_lead_time,
+                                                    CENTIMETERS_TO_METERS((float)navConfig()->general.waypoint_radius));
 
     const float nextExtraRiseM = mission.nextLegValid
         ? terrainNavMissionTurnExtraRiseM(mission.minAglCm, mission.nextMinAglCm, TERRAIN_NAV_HOLD_RECOVER_MARGIN_CM)
         : 0.0f;
 
-    return terrainNavLookaheadRoute(&path, CENTIDEGREES_TO_DEGREES((float)posControl.actualState.cog), distanceM,
+    return terrainNavLookaheadRoute(&path, &band, CENTIDEGREES_TO_DEGREES((float)posControl.actualState.cog), distanceM,
                                     climbRatio, escapeRatio, nextExtraRiseM, result);
 }
 

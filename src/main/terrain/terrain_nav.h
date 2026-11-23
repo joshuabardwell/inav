@@ -44,6 +44,8 @@ typedef struct {
     float escapeDeficitM;   // worst height deficit vs the escapeRatio slope (>= 0) - the escape test's raw input
     uint8_t samplesTotal;   // points sampled along the path
     uint8_t samplesMissed;  // points that had no terrain data (loads were scheduled)
+    uint8_t bandSamples;    // mission scan: points sampled beside the first lane
+    uint16_t bandSkipped;   // mission scan: band points left out (sample or block budget)
 } terrainNavLookaheadResult_t;
 
 // True only while terrain data is usable: module enabled, no IO failure
@@ -70,14 +72,14 @@ bool terrainNavGetHomeTerrainHeight(float *heightM);
 // full-capability escape test) - same samples, no extra SD load
 bool terrainNavLookahead(float bearingDeg, float distanceM, float climbRatio, float escapeRatio, terrainNavLookaheadResult_t *result);
 
-// The same walk along a waypoint mission's route (terrain_nav_mission_logic.h):
-// from courseDeg, turning toward the waypoint at most path->maxTurnDeg per step,
-// then along the next leg, where nextExtraRiseM is added to the terrain rise.
-// On a turning step the achievable climb grows by only
-// TERRAIN_NAV_MISSION_TURN_CLIMB_FACTOR of climbRatio; the escape slope is
-// never reduced
-bool terrainNavLookaheadRoute(const terrainNavMissionPath_t *path, float courseDeg, float distanceM,
-                              float climbRatio, float escapeRatio, float nextExtraRiseM,
+// The same walk along a waypoint mission's route, as a band of lanes
+// (terrain_nav_mission_logic.h): from courseDeg, each lane turning toward the waypoint at
+// most band->maxTurnDeg[lane] per step, then toward the next waypoint, where
+// nextExtraRiseM is added to the terrain rise. On a turning step the achievable climb grows
+// by only TERRAIN_NAV_MISSION_TURN_CLIMB_FACTOR of climbRatio; the escape slope is never
+// reduced. The highest ground of the band counts, on both slopes
+bool terrainNavLookaheadRoute(const terrainNavMissionPath_t *path, const terrainNavBand_t *band, float courseDeg,
+                              float distanceM, float climbRatio, float escapeRatio, float nextExtraRiseM,
                               terrainNavLookaheadResult_t *result);
 
 // Home terrain height as latched when the GPS origin was set (no map query)

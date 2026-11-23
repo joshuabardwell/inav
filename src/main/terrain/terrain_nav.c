@@ -162,6 +162,8 @@ bool terrainNavLookahead(float bearingDeg, float distanceM, float climbRatio, fl
     result->escapeDeficitM = 0.0f;
     result->samplesTotal = 0;
     result->samplesMissed = 0;
+    result->bandSamples = 0;
+    result->bandSkipped = 0;
 
     gpsLocation_t pos;
     if (!terrainNavCurrentLocation(&pos)) {
@@ -222,15 +224,43 @@ bool terrainNavGetLatchedHomeHeight(float *heightM)
     return true;
 }
 
-// terrainNavLookahead() along a waypoint mission's route: the path of
-// terrain_nav_mission_logic.h, which starts on the course over ground, turns
-// toward the waypoint the way the aircraft will, and follows the next leg past
-// it. nextExtraRiseM is added to the terrain rise of every sample on the next
-// leg (a different minimum height applies there). Same step, same sample limit
-// and the same two slopes as the straight walk, except that a turning step
-// adds less achievable climb: a banked aircraft climbs worse
-bool terrainNavLookaheadRoute(const terrainNavMissionPath_t *path, float courseDeg, float distanceM,
-                              float climbRatio, float escapeRatio, float nextExtraRiseM,
+// The band walk's view of the map (terrain_nav_mission_logic.h): points are metres north
+// and east of the aircraft
+typedef struct {
+    gpsLocation_t start;
+    gpsLocation_t point;
+} terrainNavRouteMap_t;
+
+static void terrainNavRouteBlock(void *ctx, float northM, float eastM, int32_t *blockLat, int32_t *blockLon)
+{
+    terrainNavRouteMap_t *map = ctx;
+    map->point = map->start;
+    offsetLatlng(&map->point, northM, eastM);
+
+    // The block the data layer will look the point up in: its tile and its index in it
+    gridInfo_t info;
+    calculateGridInfo(&map->point, &info);
+    *blockLat = (int32_t)info.latDegrees * 100000 + info.grid_idx_x;
+    *blockLon = (int32_t)info.lonDegrees * 100000 + info.grid_idx_y;
+}
+
+static bool terrainNavRouteHeight(void *ctx, float *heightM)
+{
+    terrainNavRouteMap_t *map = ctx;
+    return terrainNavGetHeightAtLocation(&map->point, heightM);
+}
+
+// terrainNavLookahead() along a waypoint mission's route: the band of
+// terrain_nav_mission_logic.h. Its lanes start on the course over ground, turn toward the
+// waypoint the way the aircraft may, switch to the next waypoint where the navigation
+// controller will and turn toward that one. nextExtraRiseM is added to the terrain rise
+// of every sample on the way to the next waypoint (a different minimum height applies
+// there). Lane 0 has the step, the sample limit and the two slopes of the straight walk,
+// except that a turning step adds less achievable climb: a banked aircraft climbs worse.
+// The rest of the band is held to the block budget of a query cycle (cache size minus 2,
+// the block under the aircraft included) by counting the blocks it touches
+bool terrainNavLookaheadRoute(const terrainNavMissionPath_t *path, const terrainNavBand_t *band, float courseDeg,
+                              float distanceM, float climbRatio, float escapeRatio, float nextExtraRiseM,
                               terrainNavLookaheadResult_t *result)
 {
     if (result == NULL || !terrainNavIsHealthy()) {
@@ -241,57 +271,33 @@ bool terrainNavLookaheadRoute(const terrainNavMissionPath_t *path, float courseD
     result->escapeDeficitM = 0.0f;
     result->samplesTotal = 0;
     result->samplesMissed = 0;
+    result->bandSamples = 0;
+    result->bandSkipped = 0;
 
-    gpsLocation_t pos;
-    if (!terrainNavCurrentLocation(&pos)) {
+    terrainNavRouteMap_t map;
+    if (!terrainNavCurrentLocation(&map.start)) {
         return false;
     }
     float baseHeightM;
-    if (!terrainNavGetHeightAtLocation(&pos, &baseHeightM)) {
+    if (!terrainNavGetHeightAtLocation(&map.start, &baseHeightM)) {
         return false;
     }
 
-    const float climbPerStepM = climbRatio * TERRAIN_NAV_STEP_M;
-    const float escapePerStepM = escapeRatio * TERRAIN_NAV_STEP_M;
+    const terrainNavBandTerrain_t terrain = {
+        .ctx = &map,
+        .block = terrainNavRouteBlock,
+        .height = terrainNavRouteHeight,
+    };
+    terrainNavBandResult_t walked;
+    terrainNavBandWalk(path, band, courseDeg, distanceM, TERRAIN_NAV_LOOKAHEAD_MAX_SAMPLES, climbRatio, escapeRatio,
+                       nextExtraRiseM, baseHeightM, TERRAIN_GRID_BLOCK_CACHE_SIZE - 2, &terrain, &walked);
 
-    float achievableClimbM = 0.0f;
-    float escapeClimbM = 0.0f;
-
-    terrainNavMissionPathState_t walk;
-    terrainNavMissionPathStart(&walk, courseDeg);
-
-    for (float travelledM = TERRAIN_NAV_STEP_M; travelledM <= distanceM; travelledM += TERRAIN_NAV_STEP_M) {
-        if (result->samplesTotal >= TERRAIN_NAV_LOOKAHEAD_MAX_SAMPLES) {
-            break;
-        }
-
-        float stepNorthM;
-        float stepEastM;
-        if (!terrainNavMissionPathStep(&walk, path, &stepNorthM, &stepEastM)) {
-            break;      // the route ends at the waypoint
-        }
-
-        offsetLatlng(&pos, stepNorthM, stepEastM);
-        achievableClimbM += walk.turning ? climbPerStepM * TERRAIN_NAV_MISSION_TURN_CLIMB_FACTOR : climbPerStepM;
-        escapeClimbM += escapePerStepM;
-        result->samplesTotal++;
-
-        float heightM;
-        if (terrainNavGetHeightAtLocation(&pos, &heightM)) {
-            const float riseM = heightM - baseHeightM + (walk.pastWaypoint ? nextExtraRiseM : 0.0f);
-            const float deficitM = riseM - achievableClimbM;
-            if (deficitM > result->climbNeededM) {
-                result->climbNeededM = deficitM;
-            }
-            const float escapeM = riseM - escapeClimbM;
-            if (escapeM > result->escapeDeficitM) {
-                result->escapeDeficitM = escapeM;
-            }
-        } else {
-            result->samplesMissed++;
-        }
-    }
-
+    result->climbNeededM = walked.climbNeededM;
+    result->escapeDeficitM = walked.escapeDeficitM;
+    result->samplesTotal = walked.samplesTotal;
+    result->samplesMissed = walked.samplesMissed + walked.bandMissed;
+    result->bandSamples = walked.bandSamples;
+    result->bandSkipped = walked.bandSkipped;
     return true;
 }
 

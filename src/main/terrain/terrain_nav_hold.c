@@ -67,7 +67,9 @@ PG_RESET_TEMPLATE(terrainNavConfig_t, terrainNavConfig,
 // Worst-case meters of flight per newly touched cache block: block stride is
 // 720 x 840 m ground (24 x 28 points at 30 m), the worst bearing crosses a
 // block boundary every 1/sqrt(1/720^2 + 1/840^2) = 546 m. A curved path (the
-// mission scan through a turn) crosses them no faster per metre
+// first lane of the mission scan through a turn) crosses them no faster per
+// metre. The rest of the mission scan's band is wider than a path: it counts
+// the blocks it touches instead (terrainNavLookaheadRoute)
 #define TERRAIN_NAV_HOLD_M_PER_BLOCK_WORST 540
 
 // Below this ground speed the course over ground is too noisy for a lookahead
@@ -175,7 +177,9 @@ static void terrainNavHoldRunQueries(timeMs_t currentTimeMs)
 
     // Global block budget per query cycle: cache size minus 2 (C-9). The AGL
     // query above uses the current block, so the lookahead may touch at most
-    // cacheSize - 3 new blocks - its distance is capped accordingly
+    // cacheSize - 3 new blocks - its distance is capped accordingly (in a
+    // mission that bounds the first lane; the band beside it is held to the
+    // same budget by count)
     const int32_t lookaheadBudgetM = (TERRAIN_GRID_BLOCK_CACHE_SIZE - 3) * TERRAIN_NAV_HOLD_M_PER_BLOCK_WORST;
     float lookaheadDistM = MIN((int32_t)terrainNavConfig()->lookaheadDistM, lookaheadBudgetM);
 
