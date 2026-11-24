@@ -74,8 +74,11 @@ bool terrainNavMissionLookaheadStart(float distanceM, float groundSpeedCmS, floa
 // Fills the mission-specific inputs of the hold core
 void terrainNavMissionApplyInput(terrainNavHoldInput_t *in);
 
-// Takes what the hold core decided this cycle
-void terrainNavMissionStoreOutput(const terrainNavHoldOutput_t *out);
+// Takes what the hold core decided this cycle from the inputs in, and works out
+// the terrain target the leg hands to the altitude controller: the core's target
+// with its leads (terrain_nav_mission_logic.h). freshQuery: the terrain queries
+// ran this cycle, so the height above ground in the inputs is new
+void terrainNavMissionStoreOutput(const terrainNavHoldInput_t *in, const terrainNavHoldOutput_t *out, bool freshQuery);
 
 // Bits for debug word 0 of debug_mode = TERRAIN_NAV: bit 3 terrain leg being
 // flown, bits 4-5 its mode, bit 6 follow clearance known, bit 7 terrain

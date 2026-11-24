@@ -51,6 +51,10 @@ typedef struct terrainNavConfig_s {
 
 PG_DECLARE(terrainNavConfig_t, terrainNavConfig);
 
+// The climb rate the look-ahead plans with, as a fraction of nav_fw_auto_climb_rate:
+// underestimating what the aircraft can do makes climbs start early
+#define TERRAIN_NAV_HOLD_PLANNED_CLIMB_FRACTION 0.5f
+
 // The gate. Called once per navigation cycle from applyWaypointNavigationAndAltitudeHold()
 void terrainNavCruiseHoldUpdate(void);
 

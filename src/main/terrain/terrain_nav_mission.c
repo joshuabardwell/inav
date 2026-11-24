@@ -30,11 +30,14 @@
 
 #ifdef USE_TERRAIN
 
+#include "common/axis.h"
 #include "common/maths.h"
 
 #include "drivers/time.h"
 
 #include "fc/runtime_config.h"
+
+#include "flight/pid.h"
 
 #include "io/gps.h"
 
@@ -84,7 +87,17 @@ typedef struct {
 
     bool holdActive;            // the hold produced (or is briefly pausing) terrain targets
     bool haveTerrainZ;          // terrainZCm is a target from this run of terrain legs
-    float terrainZCm;
+    float terrainZCm;           // the hold's target with its leads
+
+    terrainNavMissionRise_t rise;   // the rise of the hold's target, for the measured lead
+    int32_t riseCommandedAglCm;     // what the last sample of it was computed with
+    int32_t riseMinAglCm;
+    bool riseLookaheadValid;
+    bool riseUnderCarry;
+
+    bool carryActive;           // new leg: the target of the leg before stands under this leg's
+    float carryZCm;
+    timeMs_t carryStartMs;
 } terrainNavMissionState_t;
 
 static terrainNavMissionState_t mission;
@@ -206,6 +219,16 @@ bool terrainNavMissionUpdate(timeMs_t currentTimeMs)
         mission.wpQueryNextMs = currentTimeMs;
         mission.holdActive = false;
         mission.legChanged = true;
+        // After a terrain leg of the same run, that leg's target stands until
+        // this leg has its own answers. The stock target is no substitute: it
+        // starts every leg at the altitude the aircraft has, which stops a
+        // climb in progress
+        mission.carryActive = mission.haveTerrainZ;
+        mission.carryZCm = mission.terrainZCm;
+        mission.carryStartMs = currentTimeMs;
+        if (!mission.haveTerrainZ) {
+            terrainNavMissionRiseReset(&mission.rise);
+        }
         setUpNextLeg(wp);
     }
 
@@ -303,7 +326,7 @@ bool terrainNavMissionLookaheadStart(float distanceM, float groundSpeedCmS, floa
                                                     CENTIMETERS_TO_METERS((float)navConfig()->general.waypoint_radius));
 
     const float nextExtraRiseM = mission.nextLegValid
-        ? terrainNavMissionTurnExtraRiseM(mission.minAglCm, mission.nextMinAglCm, TERRAIN_NAV_HOLD_RECOVER_MARGIN_CM)
+        ? terrainNavMissionTurnExtraRiseM(mission.minAglCm, mission.nextMinAglCm)
         : 0.0f;
 
     return terrainNavLookaheadRouteStart(&path, &band, CENTIDEGREES_TO_DEGREES((float)posControl.actualState.cog), distanceM,
@@ -321,6 +344,7 @@ void terrainNavMissionApplyInput(terrainNavHoldInput_t *in)
     in->minAglCm = mission.minAglCm;
     in->commandedAglValid = true;
     in->commandedAglCm = commandedAglCm();
+    in->lookaheadMarginCm = TERRAIN_NAV_HOLD_RECOVER_MARGIN_CM;
 
     // The altitude funnel does not apply nav_max_altitude in waypoint mode
     // when nav_wp_enforce_altitude is set, so there is no ceiling to warn about
@@ -329,13 +353,57 @@ void terrainNavMissionApplyInput(terrainNavHoldInput_t *in)
     }
 }
 
-void terrainNavMissionStoreOutput(const terrainNavHoldOutput_t *out)
+// The climb rate the look-ahead plans with; also the fastest descent a terrain
+// leg commands
+static float plannedClimbCmS(void)
+{
+    return TERRAIN_NAV_HOLD_PLANNED_CLIMB_FRACTION * (float)navConfig()->fw.max_auto_climb_rate;
+}
+
+void terrainNavMissionStoreOutput(const terrainNavHoldInput_t *in, const terrainNavHoldOutput_t *out, bool freshQuery)
 {
     mission.holdActive = (out->status == TERRAIN_NAV_HOLD_ACTIVE);
-    if (out->writeTarget) {
-        mission.haveTerrainZ = true;
-        mission.terrainZCm = out->targetZCm;
+    if (!out->writeTarget) {
+        // No target this cycle (no data, a pause): the last one stands
+        return;
     }
+
+    if (mission.carryActive && terrainNavMissionCarryEnds(mission.mode, mission.clearanceValid, in->lookaheadValid,
+                                                          in->nowMs - mission.carryStartMs)) {
+        mission.carryActive = false;
+    }
+
+    // The measured lead follows the hold's target from one terrain query to
+    // the next. A new leg, a change of the height it holds or of its minimum,
+    // and a look-ahead answer arriving or going all move that target without
+    // the terrain rising: only samples computed alike are compared
+    if (freshQuery) {
+        const int32_t commandedCm = commandedAglCm();
+        const bool comparable = !mission.carryActive && !mission.riseUnderCarry
+            && commandedCm == mission.riseCommandedAglCm && mission.minAglCm == mission.riseMinAglCm
+            && in->lookaheadValid == mission.riseLookaheadValid;
+        terrainNavMissionRiseAdd(&mission.rise, in->nowMs, out->targetZCm, comparable);
+        mission.riseCommandedAglCm = commandedCm;
+        mission.riseMinAglCm = mission.minAglCm;
+        mission.riseLookaheadValid = in->lookaheadValid;
+        mission.riseUnderCarry = mission.carryActive;
+    }
+
+    const float responseFactor = pidProfile()->fwAltControlResponseFactor;
+    const bool climbing = in->lookaheadValid && in->lookaheadClimbCm > 0.0f;
+    const float lineZCm = terrainNavMissionClimbLineZ(in->currentZCm, in->aglCm, in->minAglCm, in->lookaheadMarginCm,
+                                                      in->lookaheadClimbCm);
+    const float plannedLeadCm = terrainNavMissionPlannedLeadCm(in->lookaheadClimbCm, plannedClimbCmS(), responseFactor);
+    const float measuredLeadCm = terrainNavMissionMeasuredLeadCm(terrainNavMissionRiseRateCmS(&mission.rise),
+                                                                 (float)navConfig()->fw.max_auto_climb_rate, responseFactor);
+
+    float targetZCm = terrainNavMissionLeadTargetZ(out->targetZCm, climbing, lineZCm, plannedLeadCm, measuredLeadCm);
+    if (mission.carryActive && targetZCm < mission.carryZCm) {
+        targetZCm = mission.carryZCm;
+    }
+
+    mission.haveTerrainZ = true;
+    mission.terrainZCm = targetZCm;
 }
 
 uint32_t terrainNavMissionDebugFlags(void)
@@ -368,14 +436,38 @@ static bool trackingActiveWaypoint(void)
     return matchesActiveWaypoint(&posControl.waypointList[posControl.activeWaypointIndex]);
 }
 
+// The active waypoint asks for a terrain mode, whether or not the gate tracks it yet
+static bool activeWaypointIsTerrainLeg(void)
+{
+    if (!STATE(AIRPLANE) || !ARMING_FLAG(ARMED)) {
+        return false;
+    }
+    if (posControl.activeWaypointIndex < 0 || posControl.activeWaypointIndex >= NAV_MAX_WAYPOINTS) {
+        return false;
+    }
+    const navWaypoint_t *wp = &posControl.waypointList[posControl.activeWaypointIndex];
+    return terrainNavMissionModeFromP3(waypointHasTerrainOptions(wp), wp->p3) != TERRAIN_NAV_MISSION_OFF;
+}
+
 float terrainNavMissionAdjustTargetZ(float stockZCm)
 {
     if (!trackingActiveWaypoint()) {
+        // The first pass of a new leg. From one terrain leg to the next the
+        // target of the leg before stands, as it does for the cycles after
+        // (the carry)
+        if (mission.haveTerrainZ && mission.terrainZCm > stockZCm && activeWaypointIsTerrainLeg()) {
+            return mission.terrainZCm;
+        }
         return stockZCm;
     }
 
-    return terrainNavMissionResolveTargetZ(mission.mode, mission.clearanceValid, mission.holdActive,
-                                           mission.haveTerrainZ, mission.terrainZCm, stockZCm);
+    const float targetZCm = terrainNavMissionResolveTargetZ(mission.mode, mission.clearanceValid, mission.holdActive,
+                                                            mission.haveTerrainZ, mission.terrainZCm, stockZCm);
+    if (!mission.holdActive) {
+        return targetZCm;
+    }
+    return terrainNavMissionLimitDescentZ(targetZCm, navGetCurrentActualPositionAndVelocity()->pos.z, plannedClimbCmS(),
+                                          pidProfile()->fwAltControlResponseFactor);
 }
 
 float terrainNavMissionWaypointZ(float stockWpZCm)

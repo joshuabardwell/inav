@@ -78,6 +78,7 @@ typedef struct {
     int32_t maxAltCm;           // nav_max_altitude in the same frame, 0 = no ceiling
     bool commandedAglValid;     // waypoint missions: hold commandedAglCm instead of the AGL captured at engagement
     int32_t commandedAglCm;     // the height above ground to hold, valid only when commandedAglValid
+    int32_t lookaheadMarginCm;  // waypoint missions: the lookahead aims this far above the minimum (cruise: 0)
 } terrainNavHoldInput_t;
 
 typedef struct {

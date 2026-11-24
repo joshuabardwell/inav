@@ -52,6 +52,7 @@
 #include "terrain/terrain_nav.h"
 #include "terrain/terrain_nav_hold.h"
 #include "terrain/terrain_nav_mission.h"
+#include "terrain/terrain_nav_mission_logic.h"
 
 PG_REGISTER_WITH_RESET_TEMPLATE(terrainNavConfig_t, terrainNavConfig, PG_TERRAIN_NAV_CONFIG, 0);
 
@@ -116,6 +117,13 @@ static float queryEscapeDeficitCm;
 // control loop it has been given so far
 static bool missionScanRunning;
 static uint16_t missionScanCycles;
+// The ground under the aircraft (local frame) where the running mission scan
+// started, and where the scan whose answer stands started: the climb a scan
+// asks for is measured from there
+static bool missionScanGroundValid;
+static float missionScanGroundZCm;
+static bool queryLookaheadGroundValid;
+static float queryLookaheadGroundZCm;
 // Pilot's climb wish, latched across RX frames (see the handover block)
 static float latchedStickWishCmS;
 static bool latchedStickWishValid;
@@ -233,7 +241,7 @@ static void terrainNavHoldRunQueries(timeMs_t currentTimeMs)
     // Conservative achievable climb slope: half the configured climb rate at
     // the current ground speed - underestimating it makes climbs start early
     const float groundSpeedCmS = MAX(gpsSol.groundSpeed, 800);
-    const float climbRatio = 0.5f * navConfig()->fw.max_auto_climb_rate / groundSpeedCmS;
+    const float climbRatio = TERRAIN_NAV_HOLD_PLANNED_CLIMB_FRACTION * navConfig()->fw.max_auto_climb_rate / groundSpeedCmS;
 
     // Time cap on the scan (the fixed-distance fix): never look further ahead
     // than the aircraft flies in the time horizon
@@ -253,6 +261,8 @@ static void terrainNavHoldRunQueries(timeMs_t currentTimeMs)
     if (holdSource == TERRAIN_NAV_HOLD_SOURCE_MISSION) {
         missionScanRunning = terrainNavMissionLookaheadStart(lookaheadDistM, groundSpeedCmS, climbRatio, escapeRatio);
         missionScanCycles = 0;
+        missionScanGroundValid = queryAglValid;
+        missionScanGroundZCm = navGetCurrentActualPositionAndVelocity()->pos.z - (float)queryAglCm;
         if (!missionScanRunning) {
             queryLookaheadValid = false;
         }
@@ -292,6 +302,8 @@ static void terrainNavHoldRunScan(void)
     if (queryLookaheadValid) {
         queryLookaheadClimbCm = lookahead.climbNeededM * 100.0f;
         queryEscapeDeficitCm = lookahead.escapeDeficitM * 100.0f;
+        queryLookaheadGroundValid = missionScanGroundValid;
+        queryLookaheadGroundZCm = missionScanGroundZCm;
     }
     terrainNavHoldRecordScan(&lookahead, missionScanCycles);
 }
@@ -390,11 +402,15 @@ void terrainNavCruiseHoldUpdate(void)
     // a breach
     if (source != holdSource || (missionLeg && terrainNavMissionLegChanged())) {
         terrainNavHoldCoreReset(&holdState);
-        if (source != holdSource) {
-            // A mission scan under way belongs to the driver before. (On a new
-            // leg of the same mission it runs on: it was started on the route
-            // through the waypoint and is the newest answer there is)
-            missionScanRunning = false;
+        // A mission scan under way belongs to the driver or the leg before
+        missionScanRunning = false;
+        if (source == TERRAIN_NAV_HOLD_SOURCE_MISSION) {
+            // So does the last look-ahead answer: the climb it asks for is
+            // measured against the minimum of the leg it was scanned on. The
+            // new leg has no look-ahead until its own first scan is complete;
+            // the mission tracker keeps the target of the leg before standing
+            // meanwhile (terrainNavMissionStoreOutput)
+            queryLookaheadValid = false;
         }
         holdSource = source;
     }
@@ -406,7 +422,7 @@ void terrainNavCruiseHoldUpdate(void)
         terrainNavHoldCoreUpdate(&holdState, &in, &holdOutput);
         // A mission leg that is being held off (a disengage condition) must
         // not keep using targets from before
-        terrainNavMissionStoreOutput(&holdOutput);
+        terrainNavMissionStoreOutput(&in, &holdOutput, false);
         return;
     }
 
@@ -476,9 +492,15 @@ void terrainNavCruiseHoldUpdate(void)
         // waypoint state machine stays the only writer of the altitude target
         // in a mission: it picks the result up through
         // terrainNavMissionAdjustTargetZ(), so nothing is written from here
+        if (in.lookaheadValid && queryLookaheadGroundValid && in.aglValid) {
+            // The scan's answer, from the ground it was measured from
+            const float groundZCm = in.currentZCm - (float)in.aglCm;
+            in.lookaheadClimbCm = terrainNavMissionRebaseClimbCm(in.lookaheadClimbCm, queryLookaheadGroundZCm, groundZCm);
+            in.escapeDeficitCm = terrainNavMissionRebaseClimbCm(in.escapeDeficitCm, queryLookaheadGroundZCm, groundZCm);
+        }
         terrainNavMissionApplyInput(&in);
         terrainNavHoldCoreUpdate(&holdState, &in, &holdOutput);
-        terrainNavMissionStoreOutput(&holdOutput);
+        terrainNavMissionStoreOutput(&in, &holdOutput, queriesDue);
         return;
     }
 
