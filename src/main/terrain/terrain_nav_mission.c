@@ -89,11 +89,7 @@ typedef struct {
     bool haveTerrainZ;          // terrainZCm is a target from this run of terrain legs
     float terrainZCm;           // the hold's target with its leads
 
-    terrainNavMissionRise_t rise;   // the rise of the hold's target, for the measured lead
-    int32_t riseCommandedAglCm;     // what the last sample of it was computed with
-    int32_t riseMinAglCm;
-    bool riseLookaheadValid;
-    bool riseUnderCarry;
+    terrainNavMissionRise_t rise;   // the rise of the ground under the aircraft, for the measured lead
 
     bool carryActive;           // new leg: the target of the leg before stands under this leg's
     float carryZCm;
@@ -373,20 +369,13 @@ void terrainNavMissionStoreOutput(const terrainNavHoldInput_t *in, const terrain
         mission.carryActive = false;
     }
 
-    // The measured lead follows the hold's target from one terrain query to
-    // the next. A new leg, a change of the height it holds or of its minimum,
-    // and a look-ahead answer arriving or going all move that target without
-    // the terrain rising: only samples computed alike are compared
+    // The measured lead follows the ground under the aircraft from one
+    // terrain query to the next, and goes on the height the leg holds. It
+    // does not follow the hold's target: where that is the climb line it
+    // moves in steps, and the lead would put 2.5 times each step on top
+    const float groundZCm = in->currentZCm - (float)in->aglCm;
     if (freshQuery) {
-        const int32_t commandedCm = commandedAglCm();
-        const bool comparable = !mission.carryActive && !mission.riseUnderCarry
-            && commandedCm == mission.riseCommandedAglCm && mission.minAglCm == mission.riseMinAglCm
-            && in->lookaheadValid == mission.riseLookaheadValid;
-        terrainNavMissionRiseAdd(&mission.rise, in->nowMs, out->targetZCm, comparable);
-        mission.riseCommandedAglCm = commandedCm;
-        mission.riseMinAglCm = mission.minAglCm;
-        mission.riseLookaheadValid = in->lookaheadValid;
-        mission.riseUnderCarry = mission.carryActive;
+        terrainNavMissionRiseAdd(&mission.rise, in->nowMs, groundZCm);
     }
 
     const float responseFactor = pidProfile()->fwAltControlResponseFactor;
@@ -397,7 +386,8 @@ void terrainNavMissionStoreOutput(const terrainNavHoldInput_t *in, const terrain
     const float measuredLeadCm = terrainNavMissionMeasuredLeadCm(terrainNavMissionRiseRateCmS(&mission.rise),
                                                                  (float)navConfig()->fw.max_auto_climb_rate, responseFactor);
 
-    float targetZCm = terrainNavMissionLeadTargetZ(out->targetZCm, climbing, lineZCm, plannedLeadCm, measuredLeadCm);
+    float targetZCm = terrainNavMissionLeadTargetZ(groundZCm + (float)commandedAglCm(), climbing, lineZCm, plannedLeadCm,
+                                                   measuredLeadCm);
     if (mission.carryActive && targetZCm < mission.carryZCm) {
         targetZCm = mission.carryZCm;
     }

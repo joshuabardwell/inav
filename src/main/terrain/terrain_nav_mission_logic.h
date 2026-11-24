@@ -185,14 +185,20 @@ static inline float terrainNavMissionTurnExtraRiseM(int32_t minAglCm, int32_t ne
  * rate * 100 / response: 25 m at 10 m/s with a response of 40. The terrain target (the
  * height the leg holds, or the look-ahead's climb line) is therefore raised by a lead:
  *
- *   planned-climb lead   while the look-ahead asks for a climb: the lag of the climb rate
- *                        the look-ahead plans with, so that on the climb line the aircraft
- *                        is commanded that rate. Fades in over the first metres the scan
- *                        asks for
- *   measured lead        the lag of the rate the terrain target itself rose at over the
- *                        last second: a steady slope under a follow leg, and the last
- *                        second before a ridge, where the held height takes over from the
- *                        climb line and rises faster than the plan
+ *   planned-climb lead   on the climb line, while the look-ahead asks for a climb: the lag
+ *                        of the climb rate the look-ahead plans with, so that on the line
+ *                        the aircraft is commanded that rate. Fades in over the first
+ *                        metres the scan asks for
+ *   measured lead        on the height the leg holds: the lag of the rate the ground under
+ *                        the aircraft rose at over the last second. A steady slope under
+ *                        the leg, and the last stretch before a ridge, where the held
+ *                        height takes over from the climb line and rises faster than the
+ *                        plan
+ *
+ * The climb line gets no measured lead. It moves in steps (each scan's answer, the 30 m
+ * steps of the scan's path, a change of the speed the scan plans with), and a lead taken
+ * from its rise answers every step of the line with 2.5 times as much on top (HITL
+ * 2026-11-24: the target swung up to 90 m every 4 s).
  *
  * The commanded descent is limited to the planned climb rate: the look-ahead plans every
  * climb from level flight, and an aircraft diving at the controller's full rate meets the
@@ -205,8 +211,8 @@ static inline float terrainNavMissionTurnExtraRiseM(int32_t minAglCm, int32_t ne
 
 // The planned-climb lead is full once the look-ahead asks for this much climb
 #define TERRAIN_NAV_MISSION_LEAD_FADE_CM        1000.0f
-// The measured lead: the rise over this many samples of the terrain target (one a query
-// cycle, 100 ms)
+// The measured lead: the rise over this many samples of the ground under the aircraft
+// (one a query cycle, 100 ms)
 #define TERRAIN_NAV_MISSION_RISE_SAMPLES        10
 // Samples further apart than this do not belong to one rise
 #define TERRAIN_NAV_MISSION_RISE_GAP_MS         500
@@ -248,7 +254,7 @@ static inline float terrainNavMissionPlannedLeadCm(float lookaheadClimbCm, float
     return fade * terrainNavMissionLagCm(plannedClimbCmS, responseFactor);
 }
 
-// The rise of the terrain target over the last samples
+// The rise of the ground under the aircraft over the last samples
 typedef struct {
     bool havePrev;
     float prevZCm;
@@ -266,17 +272,14 @@ static inline void terrainNavMissionRiseReset(terrainNavMissionRise_t *rise)
     rise->next = 0;
 }
 
-// One sample of the terrain target. comparable: the target was computed as the sample
-// before was - same leg, same held height, same minimum, not under the carry. A sample that
-// is not comparable is no rise of the terrain: nothing is recorded, the rate measured so
-// far stands, and the next sample is measured from this one
-static inline void terrainNavMissionRiseAdd(terrainNavMissionRise_t *rise, uint32_t nowMs, float targetZCm, bool comparable)
+// One sample of the height of the ground under the aircraft (any fixed datum)
+static inline void terrainNavMissionRiseAdd(terrainNavMissionRise_t *rise, uint32_t nowMs, float groundZCm)
 {
     if (rise->havePrev && nowMs - rise->prevMs > TERRAIN_NAV_MISSION_RISE_GAP_MS) {
         terrainNavMissionRiseReset(rise);
     }
-    if (rise->havePrev && comparable && nowMs != rise->prevMs) {
-        rise->riseCm[rise->next] = targetZCm - rise->prevZCm;
+    if (rise->havePrev && nowMs != rise->prevMs) {
+        rise->riseCm[rise->next] = groundZCm - rise->prevZCm;
         rise->spanMs[rise->next] = (uint16_t)(nowMs - rise->prevMs);
         rise->next = (uint8_t)((rise->next + 1) % TERRAIN_NAV_MISSION_RISE_SAMPLES);
         if (rise->count < TERRAIN_NAV_MISSION_RISE_SAMPLES) {
@@ -284,11 +287,11 @@ static inline void terrainNavMissionRiseAdd(terrainNavMissionRise_t *rise, uint3
         }
     }
     rise->havePrev = true;
-    rise->prevZCm = targetZCm;
+    rise->prevZCm = groundZCm;
     rise->prevMs = nowMs;
 }
 
-// Rate the terrain target rose at over the samples held, cm/s (negative: it fell)
+// Rate the ground rose at over the samples held, cm/s (negative: it fell)
 static inline float terrainNavMissionRiseRateCmS(const terrainNavMissionRise_t *rise)
 {
     float riseCm = 0.0f;
@@ -309,13 +312,15 @@ static inline float terrainNavMissionMeasuredLeadCm(float riseRateCmS, float max
     return terrainNavMissionLagCm((riseRateCmS < maxClimbCmS) ? riseRateCmS : maxClimbCmS, responseFactor);
 }
 
-// The terrain target with its leads.
-//   holdTargetZCm   the hold core's target: the higher of the held height and the climb line
-//   climbing        the look-ahead asks for a climb (lineZCm is the climb line)
-static inline float terrainNavMissionLeadTargetZ(float holdTargetZCm, bool climbing, float lineZCm,
+// The terrain target with its leads: the higher of the held height with the measured lead
+// and, while the look-ahead asks for a climb, the climb line with the planned-climb lead.
+//   heldZCm    the height the leg holds: the ground under the aircraft + the height above
+//              ground it is asked to keep
+//   climbing   the look-ahead asks for a climb (lineZCm is the climb line)
+static inline float terrainNavMissionLeadTargetZ(float heldZCm, bool climbing, float lineZCm,
                                                  float plannedLeadCm, float measuredLeadCm)
 {
-    float targetZCm = holdTargetZCm + measuredLeadCm;
+    float targetZCm = heldZCm + measuredLeadCm;
     if (climbing && lineZCm + plannedLeadCm > targetZCm) {
         targetZCm = lineZCm + plannedLeadCm;
     }
