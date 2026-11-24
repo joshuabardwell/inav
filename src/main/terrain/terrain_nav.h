@@ -77,10 +77,14 @@ bool terrainNavLookahead(float bearingDeg, float distanceM, float climbRatio, fl
 // most band->maxTurnDeg[lane] per step, then toward the next waypoint, where
 // nextExtraRiseM is added to the terrain rise. On a turning step the achievable climb grows
 // by only TERRAIN_NAV_MISSION_TURN_CLIMB_FACTOR of climbRatio; the escape slope is never
-// reduced. The highest ground of the band counts, on both slopes
-bool terrainNavLookaheadRoute(const terrainNavMissionPath_t *path, const terrainNavBand_t *band, float courseDeg,
-                              float distanceM, float climbRatio, float escapeRatio, float nextExtraRiseM,
-                              terrainNavLookaheadResult_t *result);
+// reduced. The highest ground of the band counts, on both slopes.
+// The scan is too long for one cycle of the control loop, so it is run in pieces: Start
+// takes the aircraft's position and the route as they are now (false: no scan, terrain
+// not usable), then each Run call does at most workBudget of it (TERRAIN_NAV_BAND_WORK_*)
+// and returns true, with the result, once the scan is complete. Only one scan at a time
+bool terrainNavLookaheadRouteStart(const terrainNavMissionPath_t *path, const terrainNavBand_t *band, float courseDeg,
+                                   float distanceM, float climbRatio, float escapeRatio, float nextExtraRiseM);
+bool terrainNavLookaheadRouteRun(uint16_t workBudget, terrainNavLookaheadResult_t *result);
 
 // Home terrain height as latched when the GPS origin was set (no map query)
 bool terrainNavGetLatchedHomeHeight(float *heightM);

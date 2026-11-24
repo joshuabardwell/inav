@@ -203,6 +203,11 @@ static inline float terrainNavMissionTurnExtraRiseM(int32_t minAglCm, int32_t ne
  * steps first, and may not bring the blocks touched by the scan above the block budget of
  * a query cycle: a band is wider than a line, so the "one block per 540 m" bound of a path
  * does not hold for it and the blocks are counted instead.
+ *
+ * A scan can be run in pieces (terrainNavBandScanStart, terrainNavBandScanRun): the
+ * firmware does a fixed amount of it in each cycle of its control loop, because a whole
+ * scan takes longer than one cycle may. The scan works on what it was started with, and
+ * samples the same points in the same order however it is cut up.
  */
 
 // The scan's step: TERRAIN_NAV_STEP_M of terrain_nav.c, the grid spacing
@@ -431,196 +436,342 @@ typedef struct {
     uint16_t bandSkipped;       // band points left out: over the sample or the block budget
 } terrainNavBandResult_t;
 
+// Work one run of the scan may do (terrainNavBandScanRun): a sampled point counts
+// TERRAIN_NAV_BAND_WORK_SAMPLE, a lane moved one step TERRAIN_NAV_BAND_WORK_STEP. A point
+// costs about twice a step (two grid lookups against one atan2f, cosf, sinf)
+#define TERRAIN_NAV_BAND_WORK_SAMPLE            2
+#define TERRAIN_NAV_BAND_WORK_STEP              1
+
+// Where a scan stands between two runs
+typedef enum {
+    TERRAIN_NAV_BAND_SCAN_LANE0 = 0,    // walking lane 0 alone
+    TERRAIN_NAV_BAND_SCAN_BAND_STEP,    // the band: about to move the lanes one step
+    TERRAIN_NAV_BAND_SCAN_BAND_LANES,   // the band: sampling the lanes of this step
+    TERRAIN_NAV_BAND_SCAN_BAND_FILL,    // the band: sampling between neighbouring lanes
+    TERRAIN_NAV_BAND_SCAN_DONE,
+} terrainNavBandScanPhase_e;
+
+// One scan: what it was started with, where it stands and what it has found. The scan can
+// be run in pieces (terrainNavBandScanRun), so that no single call does the whole of it;
+// the points it samples and their order do not depend on how it is cut up
 typedef struct {
-    const terrainNavBandTerrain_t *terrain;
+    // What the scan was started with
+    terrainNavMissionPath_t path;
+    terrainNavBand_t band;
+    terrainNavBandTerrain_t terrain;
+    float courseDeg;
+    float distanceM;
+    float climbPerStepM;
+    float escapePerStepM;
+    float nextExtraRiseM;
     float baseHeightM;
+    uint8_t maxLaneSamples;
+    uint8_t blockBudget;
+
+    // Where it stands
+    uint8_t phase;                      // terrainNavBandScanPhase_e
+    uint8_t laneCount;
+    uint8_t steps;                      // band steps begun
+    uint8_t lane;                       // the lane the band phase is at
+    uint8_t piece;                      // the point between lane - 1 and lane it is at (0: none begun)
+    uint8_t pieces;
+    float travelledM;
+    float climbM;                       // lane 0
+    float escapeM;
+    float sharpestTurnDeg;
+    terrainNavMissionPathState_t lane0;
+    terrainNavMissionPathState_t lanes[TERRAIN_NAV_BAND_MAX_LANES];
+    bool alive[TERRAIN_NAV_BAND_MAX_LANES];
+    float laneClimbM[TERRAIN_NAV_BAND_MAX_LANES];
     terrainNavBlockSet_t blocks;
-    terrainNavBandResult_t *result;
-} terrainNavBandWalk_t;
+
+    terrainNavBandResult_t result;
+} terrainNavBandScan_t;
 
 // One sample: riseExtraM is added to the terrain rise, climbM and escapeM are the heights
-// the aircraft can have gained by then on the two slopes
-static inline void terrainNavBandSample(terrainNavBandWalk_t *walk, float northM, float eastM, bool lane0, uint8_t blockBudget,
-                                        float riseExtraM, float climbM, float escapeM)
+// the aircraft can have gained by then on the two slopes. Returns the work done
+static inline uint8_t terrainNavBandSample(terrainNavBandScan_t *scan, float northM, float eastM, bool lane0,
+                                           float riseExtraM, float climbM, float escapeM)
 {
-    terrainNavBandResult_t *result = walk->result;
+    terrainNavBandResult_t *result = &scan->result;
     int32_t blockLat;
     int32_t blockLon;
 
     if (!lane0 && result->bandSamples >= TERRAIN_NAV_BAND_MAX_SAMPLES) {
         result->bandSkipped++;
-        return;
+        return 0;
     }
-    walk->terrain->block(walk->terrain->ctx, northM, eastM, &blockLat, &blockLon);
+    scan->terrain.block(scan->terrain.ctx, northM, eastM, &blockLat, &blockLon);
     if (lane0) {
         // Lane 0 is bounded by its length, as the straight scan is: always sampled
-        terrainNavBlockSetAdd(&walk->blocks, blockLat, blockLon, TERRAIN_NAV_BLOCK_SET_MAX);
+        terrainNavBlockSetAdd(&scan->blocks, blockLat, blockLon, TERRAIN_NAV_BLOCK_SET_MAX);
         result->samplesTotal++;
     } else {
-        if (!terrainNavBlockSetAdd(&walk->blocks, blockLat, blockLon, blockBudget)) {
+        if (!terrainNavBlockSetAdd(&scan->blocks, blockLat, blockLon, scan->blockBudget)) {
             result->bandSkipped++;
-            return;
+            return TERRAIN_NAV_BAND_WORK_SAMPLE;
         }
         result->bandSamples++;
     }
 
     float heightM;
-    if (!walk->terrain->height(walk->terrain->ctx, &heightM)) {
+    if (!scan->terrain.height(scan->terrain.ctx, &heightM)) {
         if (lane0) {
             result->samplesMissed++;
         } else {
             result->bandMissed++;
         }
-        return;
+        return TERRAIN_NAV_BAND_WORK_SAMPLE;
     }
 
-    const float riseM = heightM - walk->baseHeightM + riseExtraM;
+    const float riseM = heightM - scan->baseHeightM + riseExtraM;
     if (riseM - climbM > result->climbNeededM) {
         result->climbNeededM = riseM - climbM;
     }
     if (riseM - escapeM > result->escapeDeficitM) {
         result->escapeDeficitM = riseM - escapeM;
     }
+    return TERRAIN_NAV_BAND_WORK_SAMPLE;
 }
 
-// The scan. Walks lane 0 first, exactly as a single path, so its blocks are counted before
-// the rest of the band may claim any; then walks all lanes together and samples the other
-// lanes and the points between neighbours.
+// Starts a scan. It walks lane 0 first, exactly as a single path, so its blocks are counted
+// before the rest of the band may claim any; then it walks all lanes together and samples
+// the other lanes and the points between neighbours.
 //   distanceM, maxLaneSamples   limits of lane 0 (and so of the band's length)
 //   climbRatio, escapeRatio     metres of climb per metre flown on the two slopes
 //   nextExtraRiseM              added to the terrain rise on the way to the next waypoint
 //   baseHeightM                 terrain height at the start
 //   blockBudget                 most blocks the scan may touch, the start's block included
+// Everything is copied: the scan goes on from where the aircraft was when it started
+static inline void terrainNavBandScanStart(terrainNavBandScan_t *scan, const terrainNavMissionPath_t *path,
+                                           const terrainNavBand_t *band, float courseDeg, float distanceM,
+                                           uint8_t maxLaneSamples, float climbRatio, float escapeRatio, float nextExtraRiseM,
+                                           float baseHeightM, uint8_t blockBudget, const terrainNavBandTerrain_t *terrain)
+{
+    scan->path = *path;
+    scan->band = *band;
+    scan->terrain = *terrain;
+    scan->courseDeg = courseDeg;
+    scan->distanceM = distanceM;
+    scan->climbPerStepM = climbRatio * TERRAIN_NAV_MISSION_PATH_STEP_M;
+    scan->escapePerStepM = escapeRatio * TERRAIN_NAV_MISSION_PATH_STEP_M;
+    scan->nextExtraRiseM = nextExtraRiseM;
+    scan->baseHeightM = baseHeightM;
+    scan->maxLaneSamples = maxLaneSamples;
+    scan->blockBudget = blockBudget;
+
+    scan->result.climbNeededM = 0.0f;
+    scan->result.escapeDeficitM = 0.0f;
+    scan->result.samplesTotal = 0;
+    scan->result.samplesMissed = 0;
+    scan->result.bandSamples = 0;
+    scan->result.bandMissed = 0;
+    scan->result.bandSkipped = 0;
+
+    // The block under the aircraft is in use by the height-above-ground query
+    int32_t blockLat;
+    int32_t blockLon;
+    scan->blocks.count = 0;
+    scan->terrain.block(scan->terrain.ctx, 0.0f, 0.0f, &blockLat, &blockLon);
+    terrainNavBlockSetAdd(&scan->blocks, blockLat, blockLon, TERRAIN_NAV_BLOCK_SET_MAX);
+
+    terrainNavMissionPathStart(&scan->lane0, courseDeg);
+    scan->travelledM = TERRAIN_NAV_MISSION_PATH_STEP_M;
+    scan->climbM = 0.0f;
+    scan->escapeM = 0.0f;
+    scan->sharpestTurnDeg = 0.0f;
+    scan->laneCount = 0;
+    scan->steps = 0;
+    scan->lane = 0;
+    scan->piece = 0;
+    scan->pieces = 0;
+    scan->phase = TERRAIN_NAV_BAND_SCAN_LANE0;
+}
+
+static inline bool terrainNavBandScanDone(const terrainNavBandScan_t *scan)
+{
+    return scan->phase == TERRAIN_NAV_BAND_SCAN_DONE;
+}
+
+// Lane 0 is walked: the rest of the band begins, or the scan ends there
+static inline void terrainNavBandScanEnterBand(terrainNavBandScan_t *scan)
+{
+    scan->phase = TERRAIN_NAV_BAND_SCAN_DONE;
+    if (scan->band.laneCount < 2) {
+        return;
+    }
+    scan->laneCount = (scan->band.laneCount < TERRAIN_NAV_BAND_MAX_LANES) ? scan->band.laneCount : TERRAIN_NAV_BAND_MAX_LANES;
+    // Lane 0 never wanted to turn more in a step than the widest lane can: every lane
+    // flies the same path, there is no band to scan (a leg flown on course)
+    if (scan->sharpestTurnDeg <= scan->band.maxTurnDeg[scan->laneCount - 1]) {
+        return;
+    }
+    for (int lane = 0; lane < scan->laneCount; lane++) {
+        terrainNavMissionPathStart(&scan->lanes[lane], scan->courseDeg);
+        scan->alive[lane] = true;
+        scan->laneClimbM[lane] = 0.0f;
+    }
+    scan->escapeM = 0.0f;
+    scan->steps = 0;
+    scan->travelledM = TERRAIN_NAV_MISSION_PATH_STEP_M;
+    scan->phase = TERRAIN_NAV_BAND_SCAN_BAND_STEP;
+}
+
+// Runs the scan on, until it is done or it has done workBudget of work in this call
+// (TERRAIN_NAV_BAND_WORK_*; 0: no limit). True once the scan is done; scan->result is
+// the answer then, and a lower bound of it before
+static inline bool terrainNavBandScanRun(terrainNavBandScan_t *scan, uint16_t workBudget)
+{
+    terrainNavBandResult_t *result = &scan->result;
+    uint16_t work = 0;
+    float stepNorthM;
+    float stepEastM;
+
+    while (scan->phase != TERRAIN_NAV_BAND_SCAN_DONE) {
+        if (workBudget != 0 && work >= workBudget) {
+            return false;
+        }
+
+        switch (scan->phase) {
+        case TERRAIN_NAV_BAND_SCAN_LANE0:
+            // One step of lane 0 and its sample
+            if (!(scan->travelledM <= scan->distanceM) || result->samplesTotal >= scan->maxLaneSamples
+                || !terrainNavMissionPathStep(&scan->lane0, &scan->path, scan->band.maxTurnDeg[0], &stepNorthM, &stepEastM)) {
+                terrainNavBandScanEnterBand(scan);
+                break;
+            }
+            if (scan->lane0.wantedTurnDeg > scan->sharpestTurnDeg) {
+                scan->sharpestTurnDeg = scan->lane0.wantedTurnDeg;
+            }
+            scan->climbM += scan->lane0.turning ? scan->climbPerStepM * TERRAIN_NAV_MISSION_TURN_CLIMB_FACTOR : scan->climbPerStepM;
+            scan->escapeM += scan->escapePerStepM;
+            work += TERRAIN_NAV_BAND_WORK_STEP;
+            work += terrainNavBandSample(scan, scan->lane0.northM, scan->lane0.eastM, true,
+                                         scan->lane0.pastWaypoint ? scan->nextExtraRiseM : 0.0f, scan->climbM, scan->escapeM);
+            scan->travelledM += TERRAIN_NAV_MISSION_PATH_STEP_M;
+            break;
+
+        case TERRAIN_NAV_BAND_SCAN_BAND_STEP: {
+            // All lanes one step on
+            if (!(scan->travelledM <= scan->distanceM) || scan->steps >= scan->maxLaneSamples) {
+                scan->phase = TERRAIN_NAV_BAND_SCAN_DONE;
+                break;
+            }
+            if (result->bandSamples >= TERRAIN_NAV_BAND_MAX_SAMPLES) {
+                result->bandSkipped++;      // the far steps of the band stay unscanned this scan
+                scan->phase = TERRAIN_NAV_BAND_SCAN_DONE;
+                break;
+            }
+            scan->steps++;
+
+            bool anyAlive = false;
+            for (int lane = 0; lane < scan->laneCount; lane++) {
+                if (scan->alive[lane]) {
+                    work += TERRAIN_NAV_BAND_WORK_STEP;
+                    if (!terrainNavMissionPathStep(&scan->lanes[lane], &scan->path, scan->band.maxTurnDeg[lane], &stepNorthM, &stepEastM)) {
+                        scan->alive[lane] = false;
+                    }
+                }
+                if (scan->alive[lane]) {
+                    anyAlive = true;
+                    scan->laneClimbM[lane] += scan->lanes[lane].turning
+                        ? scan->climbPerStepM * TERRAIN_NAV_MISSION_TURN_CLIMB_FACTOR : scan->climbPerStepM;
+                }
+            }
+            if (!anyAlive) {
+                scan->phase = TERRAIN_NAV_BAND_SCAN_DONE;
+                break;
+            }
+            scan->escapeM += scan->escapePerStepM;
+            // The lanes themselves first, then the points between them: when the sample
+            // budget runs out it is the cross-fill of the far steps that goes
+            scan->lane = 1;
+            scan->phase = TERRAIN_NAV_BAND_SCAN_BAND_LANES;
+            break;
+        }
+
+        case TERRAIN_NAV_BAND_SCAN_BAND_LANES: {
+            // One lane of this step
+            if (scan->lane >= scan->laneCount) {
+                scan->lane = 1;
+                scan->piece = 0;
+                scan->phase = TERRAIN_NAV_BAND_SCAN_BAND_FILL;
+                break;
+            }
+            const int lane = scan->lane++;
+            if (!scan->alive[lane]) {
+                break;
+            }
+            if (scan->alive[lane - 1]) {
+                const float dNorthM = scan->lanes[lane].northM - scan->lanes[lane - 1].northM;
+                const float dEastM = scan->lanes[lane].eastM - scan->lanes[lane - 1].eastM;
+                if (dNorthM * dNorthM + dEastM * dEastM < TERRAIN_NAV_BAND_LANE_MERGE_M * TERRAIN_NAV_BAND_LANE_MERGE_M) {
+                    break;
+                }
+            }
+            work += terrainNavBandSample(scan, scan->lanes[lane].northM, scan->lanes[lane].eastM, false,
+                                         scan->lanes[lane].pastWaypoint ? scan->nextExtraRiseM : 0.0f,
+                                         scan->laneClimbM[lane], scan->escapeM);
+            break;
+        }
+
+        case TERRAIN_NAV_BAND_SCAN_BAND_FILL: {
+            // One point between two neighbouring lanes of this step
+            if (scan->lane >= scan->laneCount) {
+                scan->travelledM += TERRAIN_NAV_MISSION_PATH_STEP_M;
+                scan->phase = TERRAIN_NAV_BAND_SCAN_BAND_STEP;
+                break;
+            }
+            const int lane = scan->lane;
+            if (!scan->alive[lane] || !scan->alive[lane - 1]) {
+                scan->lane++;
+                break;
+            }
+            const float dNorthM = scan->lanes[lane].northM - scan->lanes[lane - 1].northM;
+            const float dEastM = scan->lanes[lane].eastM - scan->lanes[lane - 1].eastM;
+            if (scan->piece == 0) {
+                const int pieces = (int)ceilf(sqrtf(dNorthM * dNorthM + dEastM * dEastM) / TERRAIN_NAV_MISSION_PATH_STEP_M);
+                if (pieces < 2) {
+                    scan->lane++;
+                    break;
+                }
+                scan->pieces = (pieces < 255) ? (uint8_t)pieces : 255;
+                scan->piece = 1;
+            }
+            // Between two lanes: the lower climb, the higher extra rise
+            const float extraA = scan->lanes[lane - 1].pastWaypoint ? scan->nextExtraRiseM : 0.0f;
+            const float extraB = scan->lanes[lane].pastWaypoint ? scan->nextExtraRiseM : 0.0f;
+            const float extraM = (extraA > extraB) ? extraA : extraB;
+            const float betweenClimbM = (scan->laneClimbM[lane - 1] < scan->laneClimbM[lane])
+                ? scan->laneClimbM[lane - 1] : scan->laneClimbM[lane];
+            const float f = (float)scan->piece / (float)scan->pieces;
+            work += terrainNavBandSample(scan, scan->lanes[lane - 1].northM + dNorthM * f, scan->lanes[lane - 1].eastM + dEastM * f,
+                                         false, extraM, betweenClimbM, scan->escapeM);
+            scan->piece++;
+            if (scan->piece >= scan->pieces) {
+                scan->piece = 0;
+                scan->lane++;
+            }
+            break;
+        }
+
+        default:
+            scan->phase = TERRAIN_NAV_BAND_SCAN_DONE;
+            break;
+        }
+    }
+    return true;
+}
+
+// The whole scan in one call
 static inline void terrainNavBandWalk(const terrainNavMissionPath_t *path, const terrainNavBand_t *band, float courseDeg,
                                       float distanceM, uint8_t maxLaneSamples, float climbRatio, float escapeRatio,
                                       float nextExtraRiseM, float baseHeightM, uint8_t blockBudget,
                                       const terrainNavBandTerrain_t *terrain, terrainNavBandResult_t *result)
 {
-    const float climbPerStepM = climbRatio * TERRAIN_NAV_MISSION_PATH_STEP_M;
-    const float escapePerStepM = escapeRatio * TERRAIN_NAV_MISSION_PATH_STEP_M;
-    float stepNorthM;
-    float stepEastM;
-
-    result->climbNeededM = 0.0f;
-    result->escapeDeficitM = 0.0f;
-    result->samplesTotal = 0;
-    result->samplesMissed = 0;
-    result->bandSamples = 0;
-    result->bandMissed = 0;
-    result->bandSkipped = 0;
-
-    terrainNavBandWalk_t walk = { .terrain = terrain, .baseHeightM = baseHeightM, .result = result };
-    walk.blocks.count = 0;
-
-    // The block under the aircraft is in use by the height-above-ground query
-    int32_t blockLat;
-    int32_t blockLon;
-    terrain->block(terrain->ctx, 0.0f, 0.0f, &blockLat, &blockLon);
-    terrainNavBlockSetAdd(&walk.blocks, blockLat, blockLon, TERRAIN_NAV_BLOCK_SET_MAX);
-
-    // Lane 0
-    terrainNavMissionPathState_t lane0;
-    terrainNavMissionPathStart(&lane0, courseDeg);
-    float climbM = 0.0f;
-    float escapeM = 0.0f;
-    float sharpestTurnDeg = 0.0f;
-    for (float travelledM = TERRAIN_NAV_MISSION_PATH_STEP_M; travelledM <= distanceM; travelledM += TERRAIN_NAV_MISSION_PATH_STEP_M) {
-        if (result->samplesTotal >= maxLaneSamples
-            || !terrainNavMissionPathStep(&lane0, path, band->maxTurnDeg[0], &stepNorthM, &stepEastM)) {
-            break;
-        }
-        if (lane0.wantedTurnDeg > sharpestTurnDeg) {
-            sharpestTurnDeg = lane0.wantedTurnDeg;
-        }
-        climbM += lane0.turning ? climbPerStepM * TERRAIN_NAV_MISSION_TURN_CLIMB_FACTOR : climbPerStepM;
-        escapeM += escapePerStepM;
-        terrainNavBandSample(&walk, lane0.northM, lane0.eastM, true, blockBudget,
-                             lane0.pastWaypoint ? nextExtraRiseM : 0.0f, climbM, escapeM);
-    }
-
-    if (band->laneCount < 2) {
-        return;
-    }
-
-    // The rest of the band
-    const int laneCount = (band->laneCount < TERRAIN_NAV_BAND_MAX_LANES) ? band->laneCount : TERRAIN_NAV_BAND_MAX_LANES;
-    // Lane 0 never wanted to turn more in a step than the widest lane can: every lane
-    // flies the same path, there is no band to scan (a leg flown on course)
-    if (sharpestTurnDeg <= band->maxTurnDeg[laneCount - 1]) {
-        return;
-    }
-    terrainNavMissionPathState_t lanes[TERRAIN_NAV_BAND_MAX_LANES];
-    bool alive[TERRAIN_NAV_BAND_MAX_LANES];
-    float laneClimbM[TERRAIN_NAV_BAND_MAX_LANES];
-    for (int lane = 0; lane < laneCount; lane++) {
-        terrainNavMissionPathStart(&lanes[lane], courseDeg);
-        alive[lane] = true;
-        laneClimbM[lane] = 0.0f;
-    }
-
-    escapeM = 0.0f;
-    uint8_t steps = 0;
-    for (float travelledM = TERRAIN_NAV_MISSION_PATH_STEP_M; travelledM <= distanceM; travelledM += TERRAIN_NAV_MISSION_PATH_STEP_M) {
-        if (steps >= maxLaneSamples) {
-            break;
-        }
-        if (result->bandSamples >= TERRAIN_NAV_BAND_MAX_SAMPLES) {
-            result->bandSkipped++;      // the far steps of the band stay unscanned this cycle
-            break;
-        }
-        steps++;
-
-        bool anyAlive = false;
-        for (int lane = 0; lane < laneCount; lane++) {
-            if (alive[lane] && !terrainNavMissionPathStep(&lanes[lane], path, band->maxTurnDeg[lane], &stepNorthM, &stepEastM)) {
-                alive[lane] = false;
-            }
-            if (alive[lane]) {
-                anyAlive = true;
-                laneClimbM[lane] += lanes[lane].turning ? climbPerStepM * TERRAIN_NAV_MISSION_TURN_CLIMB_FACTOR : climbPerStepM;
-            }
-        }
-        if (!anyAlive) {
-            break;
-        }
-        escapeM += escapePerStepM;
-
-        // The lanes themselves first, then the points between them: when the sample
-        // budget runs out it is the cross-fill of the far steps that goes
-        for (int lane = 1; lane < laneCount; lane++) {
-            if (!alive[lane]) {
-                continue;
-            }
-            if (alive[lane - 1]) {
-                const float dNorthM = lanes[lane].northM - lanes[lane - 1].northM;
-                const float dEastM = lanes[lane].eastM - lanes[lane - 1].eastM;
-                if (dNorthM * dNorthM + dEastM * dEastM < TERRAIN_NAV_BAND_LANE_MERGE_M * TERRAIN_NAV_BAND_LANE_MERGE_M) {
-                    continue;
-                }
-            }
-            terrainNavBandSample(&walk, lanes[lane].northM, lanes[lane].eastM, false, blockBudget,
-                                 lanes[lane].pastWaypoint ? nextExtraRiseM : 0.0f, laneClimbM[lane], escapeM);
-        }
-        for (int lane = 1; lane < laneCount; lane++) {
-            if (!alive[lane] || !alive[lane - 1]) {
-                continue;
-            }
-            const float dNorthM = lanes[lane].northM - lanes[lane - 1].northM;
-            const float dEastM = lanes[lane].eastM - lanes[lane - 1].eastM;
-            const int pieces = (int)ceilf(sqrtf(dNorthM * dNorthM + dEastM * dEastM) / TERRAIN_NAV_MISSION_PATH_STEP_M);
-            if (pieces < 2) {
-                continue;
-            }
-            // Between two lanes: the lower climb, the higher extra rise
-            const float extraA = lanes[lane - 1].pastWaypoint ? nextExtraRiseM : 0.0f;
-            const float extraB = lanes[lane].pastWaypoint ? nextExtraRiseM : 0.0f;
-            const float extraM = (extraA > extraB) ? extraA : extraB;
-            const float betweenClimbM = (laneClimbM[lane - 1] < laneClimbM[lane]) ? laneClimbM[lane - 1] : laneClimbM[lane];
-            for (int piece = 1; piece < pieces; piece++) {
-                const float f = (float)piece / (float)pieces;
-                terrainNavBandSample(&walk, lanes[lane - 1].northM + dNorthM * f, lanes[lane - 1].eastM + dEastM * f, false,
-                                     blockBudget, extraM, betweenClimbM, escapeM);
-            }
-        }
-    }
+    terrainNavBandScan_t scan;
+    terrainNavBandScanStart(&scan, path, band, courseDeg, distanceM, maxLaneSamples, climbRatio, escapeRatio, nextExtraRiseM,
+                            baseHeightM, blockBudget, terrain);
+    terrainNavBandScanRun(&scan, 0);
+    *result = scan.result;
 }

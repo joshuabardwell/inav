@@ -266,7 +266,7 @@ bool terrainNavMissionResolveWaypoint(timeMs_t currentTimeMs)
     return true;
 }
 
-bool terrainNavMissionLookahead(float distanceM, float groundSpeedCmS, float climbRatio, float escapeRatio, terrainNavLookaheadResult_t *result)
+bool terrainNavMissionLookaheadStart(float distanceM, float groundSpeedCmS, float climbRatio, float escapeRatio)
 {
     const fpVector3_t *here = &navGetCurrentActualPositionAndVelocity()->pos;
 
@@ -306,8 +306,8 @@ bool terrainNavMissionLookahead(float distanceM, float groundSpeedCmS, float cli
         ? terrainNavMissionTurnExtraRiseM(mission.minAglCm, mission.nextMinAglCm, TERRAIN_NAV_HOLD_RECOVER_MARGIN_CM)
         : 0.0f;
 
-    return terrainNavLookaheadRoute(&path, &band, CENTIDEGREES_TO_DEGREES((float)posControl.actualState.cog), distanceM,
-                                    climbRatio, escapeRatio, nextExtraRiseM, result);
+    return terrainNavLookaheadRouteStart(&path, &band, CENTIDEGREES_TO_DEGREES((float)posControl.actualState.cog), distanceM,
+                                         climbRatio, escapeRatio, nextExtraRiseM);
 }
 
 static int32_t commandedAglCm(void)
