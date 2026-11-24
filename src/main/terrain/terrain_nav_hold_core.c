@@ -288,9 +288,10 @@ static void computeTarget(terrainNavHoldState_t *state, const terrainNavHoldInpu
     float targetZCm = in->currentZCm + (state->targetAglCm - in->aglCm);
 
     // Lookahead: if terrain ahead demands more, climb early so the worst
-    // point along the path still clears the minimum AGL
+    // point along the path still clears the minimum AGL (a waypoint mission
+    // adds a margin: the aircraft lags the line it is given)
     if (in->lookaheadValid && in->lookaheadClimbCm > 0.0f) {
-        const float lookaheadZCm = in->currentZCm + (in->lookaheadClimbCm + in->minAglCm - in->aglCm);
+        const float lookaheadZCm = in->currentZCm + (in->lookaheadClimbCm + in->minAglCm + in->lookaheadMarginCm - in->aglCm);
         if (lookaheadZCm > targetZCm) {
             targetZCm = lookaheadZCm;
         }

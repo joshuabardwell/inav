@@ -166,16 +166,177 @@ static inline float terrainNavMissionLegEndZ(terrainNavMissionMode_e mode, bool 
 }
 
 // Extra rise the route look-ahead adds to terrain past the next waypoint,
-// where the next leg's minimum applies. Where that minimum is higher, the
-// height that leg will hold (minimum + margin) is the aim, so the aircraft
-// arrives at the waypoint already above the new minimum
-static inline float terrainNavMissionTurnExtraRiseM(int32_t minAglCm, int32_t nextMinAglCm, int32_t marginCm)
+// where the next leg's minimum applies: the difference of the two minimums.
+// The look-ahead aims at minimum + margin on either leg (the hold core adds
+// the margin, lookaheadMarginCm), the height a floor leg holds, so an
+// aircraft that follows the climb line exactly still clears every point by
+// the margin
+static inline float terrainNavMissionTurnExtraRiseM(int32_t minAglCm, int32_t nextMinAglCm)
 {
-    float extraCm = (float)(nextMinAglCm - minAglCm);
-    if (nextMinAglCm > minAglCm) {
-        extraCm += (float)marginCm;
+    return (float)(nextMinAglCm - minAglCm) * 0.01f;
+}
+
+/*
+ * The altitude target a terrain leg hands to the altitude controller.
+ *
+ * The fixed-wing altitude controller commands a climb rate in proportion to the altitude
+ * error: rate = response * error / 100 (nav_fw_alt_control_response). An aircraft exactly
+ * on a rising target is asked for no climb, so it settles under the target by
+ * rate * 100 / response: 25 m at 10 m/s with a response of 40. The terrain target (the
+ * height the leg holds, or the look-ahead's climb line) is therefore raised by a lead:
+ *
+ *   planned-climb lead   while the look-ahead asks for a climb: the lag of the climb rate
+ *                        the look-ahead plans with, so that on the climb line the aircraft
+ *                        is commanded that rate. Fades in over the first metres the scan
+ *                        asks for
+ *   measured lead        the lag of the rate the terrain target itself rose at over the
+ *                        last second: a steady slope under a follow leg, and the last
+ *                        second before a ridge, where the held height takes over from the
+ *                        climb line and rises faster than the plan
+ *
+ * The commanded descent is limited to the planned climb rate: the look-ahead plans every
+ * climb from level flight, and an aircraft diving at the controller's full rate meets the
+ * next rise later than planned.
+ *
+ * On the first cycles of a new leg the leg has no answers of its own (its look-ahead scan,
+ * a follow leg's clearance). Until it has, the target of the leg before stands as a floor
+ * under the new one (the carry).
+ */
+
+// The planned-climb lead is full once the look-ahead asks for this much climb
+#define TERRAIN_NAV_MISSION_LEAD_FADE_CM        1000.0f
+// The measured lead: the rise over this many samples of the terrain target (one a query
+// cycle, 100 ms)
+#define TERRAIN_NAV_MISSION_RISE_SAMPLES        10
+// Samples further apart than this do not belong to one rise
+#define TERRAIN_NAV_MISSION_RISE_GAP_MS         500
+// The carry ends by itself after this long (no look-ahead: too slow, switched off)
+#define TERRAIN_NAV_MISSION_CARRY_MAX_MS        2000
+
+// How far under a target rising at rateCmS the altitude controller lets the aircraft settle
+static inline float terrainNavMissionLagCm(float rateCmS, float responseFactor)
+{
+    return rateCmS * 100.0f / ((responseFactor > 1.0f) ? responseFactor : 1.0f);
+}
+
+// The climb a scan asks for is measured from the ground under the aircraft where the scan
+// started. The hold core adds it to the ground under the aircraft now, which is other
+// ground a moment later (and, between two terrain queries, the same ground read against a
+// newer altitude). This returns the climb to hand the core so that its line stays where the
+// scan put it: scan ground + minimum + margin + climb, until the next scan's answer
+static inline float terrainNavMissionRebaseClimbCm(float climbCm, float scanGroundZCm, float groundZCm)
+{
+    const float rebasedCm = climbCm + scanGroundZCm - groundZCm;
+    return (rebasedCm > 0.0f) ? rebasedCm : 0.0f;
+}
+
+// The look-ahead's climb line, as the hold core computes it: ground under the aircraft +
+// the minimum + the margin + the climb the scan asks for
+static inline float terrainNavMissionClimbLineZ(float currentZCm, float aglCm, float minAglCm, float marginCm, float lookaheadClimbCm)
+{
+    return currentZCm - aglCm + minAglCm + marginCm + lookaheadClimbCm;
+}
+
+static inline float terrainNavMissionPlannedLeadCm(float lookaheadClimbCm, float plannedClimbCmS, float responseFactor)
+{
+    float fade = lookaheadClimbCm / TERRAIN_NAV_MISSION_LEAD_FADE_CM;
+    if (fade > 1.0f) {
+        fade = 1.0f;
+    } else if (!(fade > 0.0f)) {
+        return 0.0f;
     }
-    return extraCm * 0.01f;
+    return fade * terrainNavMissionLagCm(plannedClimbCmS, responseFactor);
+}
+
+// The rise of the terrain target over the last samples
+typedef struct {
+    bool havePrev;
+    float prevZCm;
+    uint32_t prevMs;
+    uint8_t count;
+    uint8_t next;
+    float riseCm[TERRAIN_NAV_MISSION_RISE_SAMPLES];
+    uint16_t spanMs[TERRAIN_NAV_MISSION_RISE_SAMPLES];
+} terrainNavMissionRise_t;
+
+static inline void terrainNavMissionRiseReset(terrainNavMissionRise_t *rise)
+{
+    rise->havePrev = false;
+    rise->count = 0;
+    rise->next = 0;
+}
+
+// One sample of the terrain target. comparable: the target was computed as the sample
+// before was - same leg, same held height, same minimum, not under the carry. A sample that
+// is not comparable is no rise of the terrain: nothing is recorded, the rate measured so
+// far stands, and the next sample is measured from this one
+static inline void terrainNavMissionRiseAdd(terrainNavMissionRise_t *rise, uint32_t nowMs, float targetZCm, bool comparable)
+{
+    if (rise->havePrev && nowMs - rise->prevMs > TERRAIN_NAV_MISSION_RISE_GAP_MS) {
+        terrainNavMissionRiseReset(rise);
+    }
+    if (rise->havePrev && comparable && nowMs != rise->prevMs) {
+        rise->riseCm[rise->next] = targetZCm - rise->prevZCm;
+        rise->spanMs[rise->next] = (uint16_t)(nowMs - rise->prevMs);
+        rise->next = (uint8_t)((rise->next + 1) % TERRAIN_NAV_MISSION_RISE_SAMPLES);
+        if (rise->count < TERRAIN_NAV_MISSION_RISE_SAMPLES) {
+            rise->count++;
+        }
+    }
+    rise->havePrev = true;
+    rise->prevZCm = targetZCm;
+    rise->prevMs = nowMs;
+}
+
+// Rate the terrain target rose at over the samples held, cm/s (negative: it fell)
+static inline float terrainNavMissionRiseRateCmS(const terrainNavMissionRise_t *rise)
+{
+    float riseCm = 0.0f;
+    uint32_t spanMs = 0;
+    for (uint8_t i = 0; i < rise->count; i++) {
+        riseCm += rise->riseCm[i];
+        spanMs += rise->spanMs[i];
+    }
+    return (spanMs > 0) ? riseCm * 1000.0f / (float)spanMs : 0.0f;
+}
+
+// Only a rise leads, and no faster than the altitude controller may command a climb
+static inline float terrainNavMissionMeasuredLeadCm(float riseRateCmS, float maxClimbCmS, float responseFactor)
+{
+    if (!(riseRateCmS > 0.0f)) {
+        return 0.0f;
+    }
+    return terrainNavMissionLagCm((riseRateCmS < maxClimbCmS) ? riseRateCmS : maxClimbCmS, responseFactor);
+}
+
+// The terrain target with its leads.
+//   holdTargetZCm   the hold core's target: the higher of the held height and the climb line
+//   climbing        the look-ahead asks for a climb (lineZCm is the climb line)
+static inline float terrainNavMissionLeadTargetZ(float holdTargetZCm, bool climbing, float lineZCm,
+                                                 float plannedLeadCm, float measuredLeadCm)
+{
+    float targetZCm = holdTargetZCm + measuredLeadCm;
+    if (climbing && lineZCm + plannedLeadCm > targetZCm) {
+        targetZCm = lineZCm + plannedLeadCm;
+    }
+    return targetZCm;
+}
+
+// The target no lower than the altitude controller answers with a descent of maxDescentCmS
+static inline float terrainNavMissionLimitDescentZ(float targetZCm, float currentZCm, float maxDescentCmS, float responseFactor)
+{
+    const float lowestZCm = currentZCm - terrainNavMissionLagCm(maxDescentCmS, responseFactor);
+    return (targetZCm > lowestZCm) ? targetZCm : lowestZCm;
+}
+
+// True when the target of the leg before no longer has to stand under the new leg's: the
+// leg's own look-ahead has answered and, on a follow leg, its clearance is known
+static inline bool terrainNavMissionCarryEnds(terrainNavMissionMode_e mode, bool clearanceValid, bool lookaheadValid, uint32_t elapsedMs)
+{
+    if (elapsedMs >= TERRAIN_NAV_MISSION_CARRY_MAX_MS) {
+        return true;
+    }
+    return lookaheadValid && (mode != TERRAIN_NAV_MISSION_FOLLOW || clearanceValid);
 }
 
 /*
