@@ -258,46 +258,53 @@ static bool terrainNavRouteHeight(void *ctx, float *heightM)
 // there). Lane 0 has the step, the sample limit and the two slopes of the straight walk,
 // except that a turning step adds less achievable climb: a banked aircraft climbs worse.
 // The rest of the band is held to the block budget of a query cycle (cache size minus 2,
-// the block under the aircraft included) by counting the blocks it touches
-bool terrainNavLookaheadRoute(const terrainNavMissionPath_t *path, const terrainNavBand_t *band, float courseDeg,
-                              float distanceM, float climbRatio, float escapeRatio, float nextExtraRiseM,
-                              terrainNavLookaheadResult_t *result)
+// the block under the aircraft included) by counting the blocks it touches.
+//
+// One scan is up to 97 points and about 140 lane steps, several times what one cycle of
+// the control loop has room for (HITL 2026-11-23: up to 685 us on an H7, in a 500 us
+// loop). So the scan is kept here between calls and run a piece at a time; it works on
+// the position and the route it was started with, a few milliseconds old when it ends
+static terrainNavRouteMap_t routeMap;
+static terrainNavBandScan_t routeScan;
+
+bool terrainNavLookaheadRouteStart(const terrainNavMissionPath_t *path, const terrainNavBand_t *band, float courseDeg,
+                                   float distanceM, float climbRatio, float escapeRatio, float nextExtraRiseM)
 {
-    if (result == NULL || !terrainNavIsHealthy()) {
+    if (!terrainNavIsHealthy()) {
         return false;
     }
 
-    result->climbNeededM = 0.0f;
-    result->escapeDeficitM = 0.0f;
-    result->samplesTotal = 0;
-    result->samplesMissed = 0;
-    result->bandSamples = 0;
-    result->bandSkipped = 0;
-
-    terrainNavRouteMap_t map;
-    if (!terrainNavCurrentLocation(&map.start)) {
+    if (!terrainNavCurrentLocation(&routeMap.start)) {
         return false;
     }
     float baseHeightM;
-    if (!terrainNavGetHeightAtLocation(&map.start, &baseHeightM)) {
+    if (!terrainNavGetHeightAtLocation(&routeMap.start, &baseHeightM)) {
         return false;
     }
 
     const terrainNavBandTerrain_t terrain = {
-        .ctx = &map,
+        .ctx = &routeMap,
         .block = terrainNavRouteBlock,
         .height = terrainNavRouteHeight,
     };
-    terrainNavBandResult_t walked;
-    terrainNavBandWalk(path, band, courseDeg, distanceM, TERRAIN_NAV_LOOKAHEAD_MAX_SAMPLES, climbRatio, escapeRatio,
-                       nextExtraRiseM, baseHeightM, TERRAIN_GRID_BLOCK_CACHE_SIZE - 2, &terrain, &walked);
+    terrainNavBandScanStart(&routeScan, path, band, courseDeg, distanceM, TERRAIN_NAV_LOOKAHEAD_MAX_SAMPLES, climbRatio,
+                            escapeRatio, nextExtraRiseM, baseHeightM, TERRAIN_GRID_BLOCK_CACHE_SIZE - 2, &terrain);
+    return true;
+}
 
-    result->climbNeededM = walked.climbNeededM;
-    result->escapeDeficitM = walked.escapeDeficitM;
-    result->samplesTotal = walked.samplesTotal;
-    result->samplesMissed = walked.samplesMissed + walked.bandMissed;
-    result->bandSamples = walked.bandSamples;
-    result->bandSkipped = walked.bandSkipped;
+bool terrainNavLookaheadRouteRun(uint16_t workBudget, terrainNavLookaheadResult_t *result)
+{
+    if (!terrainNavBandScanRun(&routeScan, workBudget)) {
+        return false;
+    }
+
+    const terrainNavBandResult_t *walked = &routeScan.result;
+    result->climbNeededM = walked->climbNeededM;
+    result->escapeDeficitM = walked->escapeDeficitM;
+    result->samplesTotal = walked->samplesTotal;
+    result->samplesMissed = walked->samplesMissed + walked->bandMissed;
+    result->bandSamples = walked->bandSamples;
+    result->bandSkipped = walked->bandSkipped;
     return true;
 }
 

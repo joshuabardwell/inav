@@ -985,6 +985,9 @@ static void processBlackbox(void)
 #endif
 void taskMainPidLoop(timeUs_t currentTimeUs)
 {
+#ifdef USE_TERRAIN
+    const timeUs_t taskStartUs = micros();
+#endif
 
     cycleTime = getTaskDeltaTime(TASK_SELF);
     dT = US2S(cycleTime);
@@ -1090,6 +1093,25 @@ void taskMainPidLoop(timeUs_t currentTimeUs)
 #ifdef USE_BLACKBOX
     if (!cliMode && feature(FEATURE_BLACKBOX)) {
         processBlackbox();
+    }
+#endif
+
+#ifdef USE_TERRAIN
+    // debug_mode = TERRAIN_COST, value 2: the longest run of this task in the
+    // previous 100 ms window, in us, held for the whole next window so that
+    // the blackbox (every few loops) sees it (terrain_nav_hold.c lists the rest)
+    if (debugMode == DEBUG_TERRAIN_COST) {
+        static timeUs_t windowStartUs;
+        static uint32_t longestUs;
+        static uint32_t publishedUs;
+        const timeUs_t endUs = micros();
+        longestUs = MAX(longestUs, (uint32_t)(endUs - taskStartUs));
+        if (cmpTimeUs(endUs, windowStartUs) >= 100000) {
+            windowStartUs = endUs;
+            publishedUs = longestUs;
+            longestUs = 0;
+        }
+        DEBUG_SET(DEBUG_TERRAIN_COST, 2, publishedUs);
     }
 #endif
 }

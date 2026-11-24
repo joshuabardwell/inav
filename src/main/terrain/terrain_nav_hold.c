@@ -69,8 +69,17 @@ PG_RESET_TEMPLATE(terrainNavConfig_t, terrainNavConfig,
 // block boundary every 1/sqrt(1/720^2 + 1/840^2) = 546 m. A curved path (the
 // first lane of the mission scan through a turn) crosses them no faster per
 // metre. The rest of the mission scan's band is wider than a path: it counts
-// the blocks it touches instead (terrainNavLookaheadRoute)
+// the blocks it touches instead (terrainNavLookaheadRouteStart)
 #define TERRAIN_NAV_HOLD_M_PER_BLOCK_WORST 540
+
+// The mission scan's share of one cycle of the control loop, in units of work
+// (TERRAIN_NAV_BAND_WORK_*): 8 points of lane 0 with their steps, or up to 12
+// points of the band. A whole scan cost up to 685 us on an H7 against a loop of
+// 500 us (HITL 2026-11-23, about 6.4 us a point); the largest scan (97 points)
+// is spread over 19 cycles at this share, so one share is about 40 us there and
+// the answer is about 10 ms old when it is taken (tools/test_terrain_logic.c
+// checks the 19)
+#define TERRAIN_NAV_HOLD_SCAN_WORK_PER_CYCLE 24
 
 // Below this ground speed the course over ground is too noisy for a lookahead
 #define TERRAIN_NAV_HOLD_MIN_LOOKAHEAD_SPEED_CM_S 300
@@ -103,6 +112,10 @@ static int32_t queryAglCm;
 static bool queryLookaheadValid;
 static float queryLookaheadClimbCm;
 static float queryEscapeDeficitCm;
+// A mission scan is under way (terrainNavHoldRunScan), and the cycles of the
+// control loop it has been given so far
+static bool missionScanRunning;
+static uint16_t missionScanCycles;
 // Pilot's climb wish, latched across RX frames (see the handover block)
 static float latchedStickWishCmS;
 static bool latchedStickWishValid;
@@ -153,6 +166,41 @@ static bool terrainNavHoldEligible(void)
     return !terrainNavHoldMustDisengage();
 }
 
+// debug_mode = TERRAIN_COST: the worst of the previous 100 ms window, held for
+// the next window so that the blackbox sees it (terrainNavHoldPublishCostDebug)
+static uint32_t debugLookUs;
+static int32_t debugScanSamples;
+static int32_t debugScanCycles;
+static uint32_t costLongestUs;
+static int32_t costMostSamples;
+static int32_t costMostCycles;
+
+// A scan is complete: the points it sampled, and the cycles it was spread over
+static void terrainNavHoldRecordScan(const terrainNavLookaheadResult_t *result, uint16_t cycles)
+{
+    // lane samples * 100 + band samples (the band holds at most 64)
+    costMostSamples = MAX(costMostSamples, (int32_t)result->samplesTotal * 100 + result->bandSamples);
+    costMostCycles = MAX(costMostCycles, (int32_t)cycles);
+}
+
+// The terrain queries and the scan took lookUs of this cycle of the control loop
+static void terrainNavHoldRecordCycleCost(uint32_t lookUs)
+{
+    static timeUs_t windowStartUs;
+
+    costLongestUs = MAX(costLongestUs, lookUs);
+    const timeUs_t nowUs = micros();
+    if (cmpTimeUs(nowUs, windowStartUs) >= 100000) {
+        windowStartUs = nowUs;
+        debugLookUs = costLongestUs;
+        debugScanSamples = costMostSamples;
+        debugScanCycles = costMostCycles;
+        costLongestUs = 0;
+        costMostSamples = 0;
+        costMostCycles = 0;
+    }
+}
+
 static void terrainNavHoldRunQueries(timeMs_t currentTimeMs)
 {
     lastQueryTimeMs = currentTimeMs;
@@ -166,12 +214,11 @@ static void terrainNavHoldRunQueries(timeMs_t currentTimeMs)
         return;
     }
 
-    queryLookaheadValid = false;
-
     // No course to scan along: lookahead disabled by config, too slow for a
     // usable course over ground, or the heading estimate itself is invalid
     // (the cog would be stale - never scan a direction we cannot trust)
     if (terrainNavConfig()->lookaheadDistM == 0 || gpsSol.groundSpeed < TERRAIN_NAV_HOLD_MIN_LOOKAHEAD_SPEED_CM_S || !isImuHeadingValid()) {
+        queryLookaheadValid = false;
         return;
     }
 
@@ -199,18 +246,54 @@ static void terrainNavHoldRunQueries(timeMs_t currentTimeMs)
 
     const float bearingDeg = CENTIDEGREES_TO_DEGREES((float)posControl.actualState.cog);
 
-    // Cruise scans straight along the course; a mission scans along its route
+    // A mission scans along its route, a band too long for one cycle of the
+    // control loop: the scan starts here, from the aircraft as it is now, and
+    // terrainNavHoldRunScan() runs it over the next cycles. Until it is
+    // complete the answer of the scan before stands
+    if (holdSource == TERRAIN_NAV_HOLD_SOURCE_MISSION) {
+        missionScanRunning = terrainNavMissionLookaheadStart(lookaheadDistM, groundSpeedCmS, climbRatio, escapeRatio);
+        missionScanCycles = 0;
+        if (!missionScanRunning) {
+            queryLookaheadValid = false;
+        }
+        return;
+    }
+
+    // Cruise scans straight along the course, in this call
     terrainNavLookaheadResult_t lookahead;
-    const bool scanned = (holdSource == TERRAIN_NAV_HOLD_SOURCE_MISSION)
-        ? terrainNavMissionLookahead(lookaheadDistM, groundSpeedCmS, climbRatio, escapeRatio, &lookahead)
-        : terrainNavLookahead(bearingDeg, lookaheadDistM, climbRatio, escapeRatio, &lookahead);
-    if (scanned) {
+    queryLookaheadValid = terrainNavLookahead(bearingDeg, lookaheadDistM, climbRatio, escapeRatio, &lookahead);
+    if (queryLookaheadValid) {
         // A partial answer (samples missed at the far end) is still a valid
         // lower bound; the missed blocks are already scheduled for loading
-        queryLookaheadValid = true;
+        queryLookaheadClimbCm = lookahead.climbNeededM * 100.0f;
+        queryEscapeDeficitCm = lookahead.escapeDeficitM * 100.0f;
+        terrainNavHoldRecordScan(&lookahead, 1);
+    }
+}
+
+// This cycle's share of the mission scan. The scan samples the same points
+// whatever the share; the answer is taken when the last of them is done, a
+// few milliseconds after the scan started
+static void terrainNavHoldRunScan(void)
+{
+    terrainNavLookaheadResult_t lookahead;
+
+    missionScanCycles++;
+    if (!terrainNavLookaheadRouteRun(TERRAIN_NAV_HOLD_SCAN_WORK_PER_CYCLE, &lookahead)) {
+        return;
+    }
+    missionScanRunning = false;
+
+    // Terrain that became unusable while the scan ran gives no answer, as at
+    // the start of a scan. A partial answer (samples missed at the far end)
+    // is still a valid lower bound; the missed blocks are already scheduled
+    // for loading
+    queryLookaheadValid = terrainNavIsHealthy();
+    if (queryLookaheadValid) {
         queryLookaheadClimbCm = lookahead.climbNeededM * 100.0f;
         queryEscapeDeficitCm = lookahead.escapeDeficitM * 100.0f;
     }
+    terrainNavHoldRecordScan(&lookahead, missionScanCycles);
 }
 
 // Debug observer (debug_mode = TERRAIN_NAV): the hold's inputs and outputs on
@@ -269,9 +352,25 @@ static void terrainNavHoldPublishDebug(void)
     DEBUG_SET(DEBUG_TERRAIN_NAV, 7, (int32_t)posControl.navState * 1000 + (int32_t)(cycle % 1000));
 }
 
+// debug_mode = TERRAIN_COST, for timing the look-ahead on a board. Each value
+// is the worst of the previous 100 ms window:
+//   0: longest time the terrain queries and the scan took in one cycle of the
+//      control loop, us (a mission scan: its share of that cycle; cruise: the
+//      whole scan)
+//   1: most points one scan sampled: lane samples * 100 + band samples
+//   2: longest run of the PID task in its own 100 ms window, us (set in fc_core.c)
+//   3: most cycles of the control loop one scan was spread over (cruise: 1)
+static void terrainNavHoldPublishCostDebug(void)
+{
+    DEBUG_SET(DEBUG_TERRAIN_COST, 0, (int32_t)debugLookUs);
+    DEBUG_SET(DEBUG_TERRAIN_COST, 1, debugScanSamples);
+    DEBUG_SET(DEBUG_TERRAIN_COST, 3, debugScanCycles);
+}
+
 void terrainNavCruiseHoldUpdate(void)
 {
     terrainNavHoldPublishDebug();
+    terrainNavHoldPublishCostDebug();
 
     const timeMs_t currentTimeMs = millis();
 
@@ -291,6 +390,12 @@ void terrainNavCruiseHoldUpdate(void)
     // a breach
     if (source != holdSource || (missionLeg && terrainNavMissionLegChanged())) {
         terrainNavHoldCoreReset(&holdState);
+        if (source != holdSource) {
+            // A mission scan under way belongs to the driver before. (On a new
+            // leg of the same mission it runs on: it was started on the route
+            // through the waypoint and is the newest answer there is)
+            missionScanRunning = false;
+        }
         holdSource = source;
     }
 
@@ -305,8 +410,18 @@ void terrainNavCruiseHoldUpdate(void)
         return;
     }
 
-    if (currentTimeMs - lastQueryTimeMs >= TERRAIN_NAV_HOLD_QUERY_INTERVAL_MS) {
-        terrainNavHoldRunQueries(currentTimeMs);
+    // The queries start a mission scan; each cycle then runs a share of it,
+    // the first in the cycle it starts in. No new queries while one runs
+    const bool queriesDue = !missionScanRunning && currentTimeMs - lastQueryTimeMs >= TERRAIN_NAV_HOLD_QUERY_INTERVAL_MS;
+    if (queriesDue || missionScanRunning) {
+        const timeUs_t lookStartUs = micros();
+        if (queriesDue) {
+            terrainNavHoldRunQueries(currentTimeMs);
+        }
+        if (missionScanRunning) {
+            terrainNavHoldRunScan();
+        }
+        terrainNavHoldRecordCycleCost((uint32_t)(micros() - lookStartUs));
     }
 
     in.stickAdjusting = posControl.flags.isAdjustingAltitude;

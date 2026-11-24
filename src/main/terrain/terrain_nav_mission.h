@@ -67,8 +67,9 @@ bool terrainNavMissionResolveWaypoint(timeMs_t currentTimeMs);
 // over ground, turning toward the waypoint as the aircraft may at this ground
 // speed (between the navigation controller's planning bank and half of it),
 // then toward the next waypoint when that leg is a terrain leg too, with the
-// next leg's minimum
-bool terrainNavMissionLookahead(float distanceM, float groundSpeedCmS, float climbRatio, float escapeRatio, terrainNavLookaheadResult_t *result);
+// next leg's minimum. This starts the scan from where the aircraft is now (false:
+// no scan); terrainNavLookaheadRouteRun() then runs it a piece at a time
+bool terrainNavMissionLookaheadStart(float distanceM, float groundSpeedCmS, float climbRatio, float escapeRatio);
 
 // Fills the mission-specific inputs of the hold core
 void terrainNavMissionApplyInput(terrainNavHoldInput_t *in);
