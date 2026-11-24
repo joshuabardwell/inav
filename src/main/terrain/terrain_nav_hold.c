@@ -31,6 +31,7 @@
 #ifdef USE_TERRAIN
 
 #include "build/debug.h"
+#include "common/filter.h"
 #include "common/maths.h"
 
 #include "config/parameter_group.h"
@@ -93,6 +94,21 @@ PG_RESET_TEMPLATE(terrainNavConfig_t, terrainNavConfig,
 // horizon than the largest demand ever seen in the logs
 #define TERRAIN_NAV_HOLD_TIME_HORIZON_S 35
 
+// The mission scan plans with the ground speed smoothed over this long. The
+// climb a scan asks for is (rise of the ground ahead) - (planned climb rate x
+// distance / speed): for ground 650 m ahead, 1 m/s of speed is 8 m of climb.
+// An aircraft loses speed when it pitches up and gains it when it pushes over,
+// so with the speed of the moment its own climb takes the demand away and its
+// own descent brings it back (HITL 2026-11-24: the target swung 90 m every
+// 4 s). The price is paid when the ground speed really rises, as in a turn
+// downwind: until the smoothing has caught up the scan plans a steeper climb
+// than the aircraft will fly
+#define TERRAIN_NAV_HOLD_MISSION_SPEED_TAU_S 10.0f
+// A smoothed speed this old is not carried on: the mission was not scanning
+// (another mode, a pause), so the smoothing starts again from the speed now.
+// The change from one waypoint to the next is shorter and keeps it
+#define TERRAIN_NAV_HOLD_MISSION_SPEED_STALE_MS 1000
+
 // Who is driving the hold core: the cruise hold (mode switch, 3D cruise) or a
 // waypoint mission leg with a terrain mode. Never both - cruise and waypoint
 // navigation are different navigation states
@@ -117,6 +133,10 @@ static float queryEscapeDeficitCm;
 // control loop it has been given so far
 static bool missionScanRunning;
 static uint16_t missionScanCycles;
+// The smoothed ground speed the mission scan plans with
+static pt1Filter_t missionSpeedFilter;
+static bool missionSpeedValid;
+static timeMs_t missionSpeedTimeMs;
 // The ground under the aircraft (local frame) where the running mission scan
 // started, and where the scan whose answer stands started: the climb a scan
 // asks for is measured from there
@@ -209,6 +229,22 @@ static void terrainNavHoldRecordCycleCost(uint32_t lookUs)
     }
 }
 
+// The ground speed a mission scan plans with: smoothed, see
+// TERRAIN_NAV_HOLD_MISSION_SPEED_TAU_S
+static float terrainNavHoldMissionSpeed(timeMs_t currentTimeMs, float groundSpeedCmS)
+{
+    const timeMs_t sinceMs = currentTimeMs - missionSpeedTimeMs;
+    if (!missionSpeedValid || sinceMs > TERRAIN_NAV_HOLD_MISSION_SPEED_STALE_MS) {
+        pt1FilterSetTimeConstant(&missionSpeedFilter, TERRAIN_NAV_HOLD_MISSION_SPEED_TAU_S);
+        pt1FilterReset(&missionSpeedFilter, groundSpeedCmS);
+        missionSpeedValid = true;
+    } else {
+        groundSpeedCmS = pt1FilterApply3(&missionSpeedFilter, groundSpeedCmS, MS2S(sinceMs));
+    }
+    missionSpeedTimeMs = currentTimeMs;
+    return groundSpeedCmS;
+}
+
 static void terrainNavHoldRunQueries(timeMs_t currentTimeMs)
 {
     lastQueryTimeMs = currentTimeMs;
@@ -239,8 +275,13 @@ static void terrainNavHoldRunQueries(timeMs_t currentTimeMs)
     float lookaheadDistM = MIN((int32_t)terrainNavConfig()->lookaheadDistM, lookaheadBudgetM);
 
     // Conservative achievable climb slope: half the configured climb rate at
-    // the current ground speed - underestimating it makes climbs start early
-    const float groundSpeedCmS = MAX(gpsSol.groundSpeed, 800);
+    // the current ground speed - underestimating it makes climbs start early.
+    // A mission scan takes the ground speed smoothed, for everything it
+    // derives from it: the slopes, the time cap and the radius of its turns
+    float groundSpeedCmS = MAX(gpsSol.groundSpeed, 800);
+    if (holdSource == TERRAIN_NAV_HOLD_SOURCE_MISSION) {
+        groundSpeedCmS = terrainNavHoldMissionSpeed(currentTimeMs, groundSpeedCmS);
+    }
     const float climbRatio = TERRAIN_NAV_HOLD_PLANNED_CLIMB_FRACTION * navConfig()->fw.max_auto_climb_rate / groundSpeedCmS;
 
     // Time cap on the scan (the fixed-distance fix): never look further ahead
