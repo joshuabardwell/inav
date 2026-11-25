@@ -775,6 +775,18 @@ int16_t fixedWingPitchToThrottleCorrection(int16_t pitch, timeUs_t currentTimeUs
 // The bank [deg] the fixed-wing controller sizes its turns for: nav_fw_bank_angle capped by
 // max_angle_inclination_rll and the energy guard (the terrain look-ahead draws turns with it)
 float navFwGetPlanningBankDeg(void);
+// The arc the fixed-wing turn coordinator is flying, and the roll ease time [ms] it plans its
+// turns with (the terrain look-ahead draws the turn at a waypoint the way it is flown)
+typedef struct {
+    bool engaged;               // an arc is being flown
+    int8_t dir;                 // +1 right, -1 left
+    int32_t outBearing;         // [centideg] the course it rolls out on
+    bool secondStaged;          // an S: a second arc follows it, direction secondDir, onto secondOutBearing
+    int8_t secondDir;
+    int32_t secondOutBearing;
+} navFwTurnArc_t;
+void navFwGetTurnArc(navFwTurnArc_t *arc);
+float navFwGetTurnEaseMs(void);
 
 /* Geodetic functions */
 typedef enum {
