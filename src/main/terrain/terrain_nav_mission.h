@@ -68,17 +68,29 @@ bool terrainNavMissionResolveWaypoint(timeMs_t currentTimeMs);
 // speed (between the navigation controller's planning bank and half of it),
 // then toward the next waypoint when that leg is a terrain leg too, with the
 // next leg's minimum. This starts the scan from where the aircraft is now (false:
-// no scan); terrainNavLookaheadRouteRun() then runs it a piece at a time
-bool terrainNavMissionLookaheadStart(float distanceM, float groundSpeedCmS, float climbRatio, float escapeRatio);
+// no scan); terrainNavLookaheadRouteRun() then runs it a piece at a time.
+// groundValid, groundZCm: the ground under the aircraft, in the local frame, from this
+// cycle's terrain query: the scan measures the line the leg flies from there
+bool terrainNavMissionLookaheadStart(float distanceM, float groundSpeedCmS, float climbRatio, float escapeRatio,
+                                     bool groundValid, float groundZCm);
+
+// The answer of that scan for the line the leg flies (terrain_nav_mission_logic.h).
+// valid: slope holds the steepest line a point in view needs, and topM the highest ground
+// in view above the ground the scan started over; complete: every point in view had data
+void terrainNavMissionLineAnswer(bool valid, bool complete, float slope, float topM);
 
 // Fills the mission-specific inputs of the hold core
 void terrainNavMissionApplyInput(terrainNavHoldInput_t *in);
 
 // Takes what the hold core decided this cycle from the inputs in, and works out
-// the terrain target the leg hands to the altitude controller: the core's target
-// with its leads (terrain_nav_mission_logic.h). freshQuery: the terrain queries
-// ran this cycle, so the height above ground in the inputs is new
+// the terrain target the leg hands to the altitude controller: the line over the
+// ground ahead, with its lead (terrain_nav_mission_logic.h). freshQuery: the
+// terrain queries ran this cycle, so the height above ground in the inputs is new
 void terrainNavMissionStoreOutput(const terrainNavHoldInput_t *in, const terrainNavHoldOutput_t *out, bool freshQuery);
+
+// The line's height above the ground under the aircraft at the last terrain query,
+// for debug word 4 of debug_mode = TERRAIN_NAV. False without a line
+bool terrainNavMissionLineAglCm(int32_t *aglCm);
 
 // Bits for debug word 0 of debug_mode = TERRAIN_NAV: bit 3 terrain leg being
 // flown, bits 4-5 its mode, bit 6 follow clearance known, bit 7 terrain

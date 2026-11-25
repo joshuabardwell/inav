@@ -87,12 +87,27 @@ typedef struct {
 
     bool holdActive;            // the hold produced (or is briefly pausing) terrain targets
     bool haveTerrainZ;          // terrainZCm is a target from this run of terrain legs
-    float terrainZCm;           // the hold's target with its leads
+    float terrainZCm;           // the line with its lead
 
-    terrainNavMissionRise_t rise;   // the rise of the ground under the aircraft, for the measured lead
+    // The line the leg flies (terrain_nav_mission_logic.h). It goes on from one terrain leg
+    // to the next
+    bool lineValid;             // lineZCm holds a line of this run of terrain legs
+    float lineZCm;
+    float lineRateCmS;          // the rate it moves at until the next terrain query
+    float lineRiseCmS;          // its rise, smoothed, for the lead
+    float lineFreshZCm;         // where it stood at the last terrain query
+    float lineGroundZCm;        // the ground under the aircraft at that query
+    timeMs_t lineTimeMs;        // when it last moved
+    timeMs_t lineFreshMs;       // the last terrain query
+    bool lineAnswerValid;       // the look-ahead's answer for the line
+    bool lineAnswerComplete;    // every point in view had data
+    float lineSlope;
+    float lineTopZCm;           // the highest ground in view at the height the leg holds, local frame
+    float lineSpeedCmS;         // the speed the scan that answered planned with
+    float lineScanSpeedCmS;     // the same of the scan that is running
+    float lineScanHeldZCm;      // the ground under the aircraft + the held height where that scan started
 
-    bool carryActive;           // new leg: the target of the leg before stands under this leg's
-    float carryZCm;
+    bool carryActive;           // new leg: the line may not come down before the leg has its own answers
     timeMs_t carryStartMs;
 } terrainNavMissionState_t;
 
@@ -135,6 +150,7 @@ static void deactivate(bool keepTerrainTarget)
     mission.holdActive = false;
     if (!keepTerrainTarget) {
         mission.haveTerrainZ = false;
+        mission.lineValid = false;
     }
 }
 
@@ -215,16 +231,14 @@ bool terrainNavMissionUpdate(timeMs_t currentTimeMs)
         mission.wpQueryNextMs = currentTimeMs;
         mission.holdActive = false;
         mission.legChanged = true;
-        // After a terrain leg of the same run, that leg's target stands until
-        // this leg has its own answers. The stock target is no substitute: it
-        // starts every leg at the altitude the aircraft has, which stops a
-        // climb in progress
+        // After a terrain leg of the same run the line goes on, and does not
+        // come down until this leg has its own answers: its look-ahead scan
+        // and, on a follow leg, its clearance (until then the leg holds
+        // minimum + margin). The answer of the leg before was measured from
+        // that leg's held height
         mission.carryActive = mission.haveTerrainZ;
-        mission.carryZCm = mission.terrainZCm;
         mission.carryStartMs = currentTimeMs;
-        if (!mission.haveTerrainZ) {
-            terrainNavMissionRiseReset(&mission.rise);
-        }
+        mission.lineAnswerValid = false;
         setUpNextLeg(wp);
     }
 
@@ -285,7 +299,15 @@ bool terrainNavMissionResolveWaypoint(timeMs_t currentTimeMs)
     return true;
 }
 
-bool terrainNavMissionLookaheadStart(float distanceM, float groundSpeedCmS, float climbRatio, float escapeRatio)
+// The height above ground the leg holds
+static int32_t commandedAglCm(void)
+{
+    return terrainNavMissionCommandedAglCm(mission.mode, mission.clearanceValid, mission.clearanceCm,
+                                           mission.minAglCm, TERRAIN_NAV_HOLD_RECOVER_MARGIN_CM);
+}
+
+bool terrainNavMissionLookaheadStart(float distanceM, float groundSpeedCmS, float climbRatio, float escapeRatio,
+                                     bool groundValid, float groundZCm)
 {
     const fpVector3_t *here = &navGetCurrentActualPositionAndVelocity()->pos;
 
@@ -325,14 +347,33 @@ bool terrainNavMissionLookaheadStart(float distanceM, float groundSpeedCmS, floa
         ? terrainNavMissionTurnExtraRiseM(mission.minAglCm, mission.nextMinAglCm)
         : 0.0f;
 
+    // The line the leg flies is aimed over the ground from where it stands now, at the
+    // height this leg holds; past the waypoint, at the next leg's minimum + margin. It
+    // looks TERRAIN_NAV_MISSION_VIEW_S of flight ahead, at the speed the scan plans with
+    float lineStartM = 0.0f;
+    mission.lineScanHeldZCm = groundZCm + (float)commandedAglCm();
+    if (groundValid && mission.lineValid) {
+        const float lineAboveHeldCm = mission.lineZCm - mission.lineScanHeldZCm;
+        lineStartM = CENTIMETERS_TO_METERS(lineAboveHeldCm);
+    }
+    const float lineViewCm = groundSpeedCmS * TERRAIN_NAV_MISSION_VIEW_S;
+    const float lineNextExtraM = mission.nextLegValid
+        ? terrainNavMissionLineNextExtraM(commandedAglCm(), mission.nextMinAglCm, TERRAIN_NAV_HOLD_RECOVER_MARGIN_CM)
+        : 0.0f;
+    mission.lineScanSpeedCmS = groundSpeedCmS;
+
     return terrainNavLookaheadRouteStart(&path, &band, CENTIDEGREES_TO_DEGREES((float)posControl.actualState.cog), distanceM,
-                                         climbRatio, escapeRatio, nextExtraRiseM);
+                                         climbRatio, escapeRatio, nextExtraRiseM,
+                                         lineStartM, CENTIMETERS_TO_METERS(lineViewCm), lineNextExtraM);
 }
 
-static int32_t commandedAglCm(void)
+void terrainNavMissionLineAnswer(bool valid, bool complete, float slope, float topM)
 {
-    return terrainNavMissionCommandedAglCm(mission.mode, mission.clearanceValid, mission.clearanceCm,
-                                           mission.minAglCm, TERRAIN_NAV_HOLD_RECOVER_MARGIN_CM);
+    mission.lineAnswerValid = valid;
+    mission.lineAnswerComplete = complete;
+    mission.lineSlope = slope;
+    mission.lineTopZCm = mission.lineScanHeldZCm + METERS_TO_CENTIMETERS(topM);
+    mission.lineSpeedCmS = mission.lineScanSpeedCmS;
 }
 
 void terrainNavMissionApplyInput(terrainNavHoldInput_t *in)
@@ -356,11 +397,15 @@ static float plannedClimbCmS(void)
     return TERRAIN_NAV_HOLD_PLANNED_CLIMB_FRACTION * (float)navConfig()->fw.max_auto_climb_rate;
 }
 
+// A longer gap than this between two targets is not flown time (a pause, lost data): the
+// line does not move for it
+#define TERRAIN_NAV_MISSION_LINE_GAP_MS     500
+
 void terrainNavMissionStoreOutput(const terrainNavHoldInput_t *in, const terrainNavHoldOutput_t *out, bool freshQuery)
 {
     mission.holdActive = (out->status == TERRAIN_NAV_HOLD_ACTIVE);
     if (!out->writeTarget) {
-        // No target this cycle (no data, a pause): the last one stands
+        // No target this cycle (no data, a pause): the line stands where it is
         return;
     }
 
@@ -369,31 +414,82 @@ void terrainNavMissionStoreOutput(const terrainNavHoldInput_t *in, const terrain
         mission.carryActive = false;
     }
 
-    // The measured lead follows the ground under the aircraft from one
-    // terrain query to the next, and goes on the height the leg holds. It
-    // does not follow the hold's target: where that is the climb line it
-    // moves in steps, and the lead would put 2.5 times each step on top
+    const float maxClimbCmS = (float)navConfig()->fw.max_auto_climb_rate;
     const float groundZCm = in->currentZCm - (float)in->aglCm;
-    if (freshQuery) {
-        terrainNavMissionRiseAdd(&mission.rise, in->nowMs, groundZCm);
+    const float hardFloorZCm = groundZCm + (float)in->minAglCm + (float)in->lookaheadMarginCm;
+
+    if (!mission.lineValid) {
+        // The first target of a run of terrain legs: the line starts at the height the
+        // leg holds. An aircraft above it comes down at the descent limit
+        // (terrainNavMissionAdjustTargetZ), and a floor leg's stock line is not held up
+        mission.lineValid = true;
+        mission.lineZCm = groundZCm + (float)commandedAglCm();
+        mission.lineRateCmS = 0.0f;
+        mission.lineRiseCmS = 0.0f;
+        mission.lineFreshZCm = mission.lineZCm;
+        mission.lineGroundZCm = groundZCm;
+        mission.lineTimeMs = in->nowMs;
+        mission.lineFreshMs = in->nowMs;
     }
 
-    const float responseFactor = pidProfile()->fwAltControlResponseFactor;
-    const bool climbing = in->lookaheadValid && in->lookaheadClimbCm > 0.0f;
-    const float lineZCm = terrainNavMissionClimbLineZ(in->currentZCm, in->aglCm, in->minAglCm, in->lookaheadMarginCm,
-                                                      in->lookaheadClimbCm);
-    const float plannedLeadCm = terrainNavMissionPlannedLeadCm(in->lookaheadClimbCm, plannedClimbCmS(), responseFactor);
-    const float measuredLeadCm = terrainNavMissionMeasuredLeadCm(terrainNavMissionRiseRateCmS(&mission.rise),
-                                                                 (float)navConfig()->fw.max_auto_climb_rate, responseFactor);
+    // Between two terrain queries the line goes on at the rate of the last one
+    const uint32_t movedMs = in->nowMs - mission.lineTimeMs;
+    mission.lineTimeMs = in->nowMs;
+    if (movedMs <= TERRAIN_NAV_MISSION_LINE_GAP_MS) {
+        mission.lineZCm += mission.lineRateCmS * (float)movedMs * 0.001f;
+    }
 
-    float targetZCm = terrainNavMissionLeadTargetZ(groundZCm + (float)commandedAglCm(), climbing, lineZCm, plannedLeadCm,
-                                                   measuredLeadCm);
-    if (mission.carryActive && targetZCm < mission.carryZCm) {
-        targetZCm = mission.carryZCm;
+    if (freshQuery) {
+        // New ground under the aircraft: what the line may never be under, its rise since
+        // the last query, and the rate it moves at until the next
+        const uint32_t freshMs = in->nowMs - mission.lineFreshMs;
+        const float freshS = (freshMs <= TERRAIN_NAV_MISSION_LINE_GAP_MS) ? (float)freshMs * 0.001f : 0.0f;
+        const bool climbing = in->lookaheadValid && in->lookaheadClimbCm > 0.0f;
+        const float climbLineZCm = terrainNavMissionClimbLineZ(in->currentZCm, in->aglCm, in->minAglCm, in->lookaheadMarginCm,
+                                                               in->lookaheadClimbCm);
+        mission.lineZCm = terrainNavMissionLineAdvanceZ(mission.lineZCm, 0.0f, freshS, groundZCm + (float)commandedAglCm(),
+                                                        plannedClimbCmS(), hardFloorZCm, climbing, climbLineZCm);
+        mission.lineRiseCmS = terrainNavMissionLineRiseCmS(mission.lineRiseCmS, mission.lineFreshZCm, mission.lineZCm, freshS,
+                                                           maxClimbCmS);
+        mission.lineFreshZCm = mission.lineZCm;
+        mission.lineGroundZCm = groundZCm;
+        mission.lineFreshMs = in->nowMs;
+
+        if (terrainNavConfig()->lookaheadDistM == 0) {
+            // The look-ahead is switched off: nothing to aim at, and the only ground in
+            // view is the ground under the aircraft. The line comes down to the height
+            // the leg holds there and stays on it
+            mission.lineRateCmS = terrainNavMissionLineRateCmS(true, -1.0f, 0.0f,
+                                                               mission.lineZCm - (groundZCm + (float)commandedAglCm()),
+                                                               !mission.carryActive, plannedClimbCmS(), maxClimbCmS);
+        } else if (mission.carryActive && !in->lookaheadValid) {
+            // A new leg whose look-ahead has not answered yet: the line goes on as it was
+            // going on the leg before, but not down
+            if (mission.lineRateCmS < 0.0f) {
+                mission.lineRateCmS = 0.0f;
+            }
+        } else {
+            const bool answered = in->lookaheadValid && mission.lineAnswerValid;
+            mission.lineRateCmS = terrainNavMissionLineRateCmS(answered, mission.lineSlope, mission.lineSpeedCmS,
+                                                               mission.lineZCm - mission.lineTopZCm,
+                                                               !mission.carryActive && mission.lineAnswerComplete,
+                                                               plannedClimbCmS(), maxClimbCmS);
+        }
     }
 
     mission.haveTerrainZ = true;
-    mission.terrainZCm = targetZCm;
+    mission.terrainZCm = terrainNavMissionLineTargetZ(mission.lineZCm, mission.lineRiseCmS,
+                                                      pidProfile()->fwAltControlResponseFactor);
+}
+
+bool terrainNavMissionLineAglCm(int32_t *aglCm)
+{
+    if (!mission.active || !mission.lineValid) {
+        return false;
+    }
+
+    *aglCm = lrintf(mission.lineZCm - mission.lineGroundZCm);
+    return true;
 }
 
 uint32_t terrainNavMissionDebugFlags(void)

@@ -300,12 +300,14 @@ static void terrainNavHoldRunQueries(timeMs_t currentTimeMs)
     // terrainNavHoldRunScan() runs it over the next cycles. Until it is
     // complete the answer of the scan before stands
     if (holdSource == TERRAIN_NAV_HOLD_SOURCE_MISSION) {
-        missionScanRunning = terrainNavMissionLookaheadStart(lookaheadDistM, groundSpeedCmS, climbRatio, escapeRatio);
-        missionScanCycles = 0;
         missionScanGroundValid = queryAglValid;
         missionScanGroundZCm = navGetCurrentActualPositionAndVelocity()->pos.z - (float)queryAglCm;
+        missionScanRunning = terrainNavMissionLookaheadStart(lookaheadDistM, groundSpeedCmS, climbRatio, escapeRatio,
+                                                             missionScanGroundValid, missionScanGroundZCm);
+        missionScanCycles = 0;
         if (!missionScanRunning) {
             queryLookaheadValid = false;
+            terrainNavMissionLineAnswer(false, false, 0.0f, 0.0f);
         }
         return;
     }
@@ -346,6 +348,9 @@ static void terrainNavHoldRunScan(void)
         queryLookaheadGroundValid = missionScanGroundValid;
         queryLookaheadGroundZCm = missionScanGroundZCm;
     }
+    // The line the leg flies takes its slope from the same scan
+    terrainNavMissionLineAnswer(queryLookaheadValid && lookahead.lineValid, !lookahead.lineMissed, lookahead.lineSlope,
+                                lookahead.lineTopM);
     terrainNavHoldRecordScan(&lookahead, missionScanCycles);
 }
 
@@ -359,7 +364,8 @@ static void terrainNavHoldRunScan(void)
 //   1: AGL, cm (0 when not valid)
 //   2: estimated altitude, cm
 //   3: commanded altitude target, cm
-//   4: held AGL, cm (0 unless engaged)
+//   4: held AGL, cm (0 unless engaged). On a mission leg: the height of the line the
+//      leg flies above the ground under the aircraft (terrain_nav_mission_logic.h)
 //   5: hold status (terrainNavHoldStatus_e)
 //   6: hold warning (terrainNavHoldWarning_e)
 //   7: navigation state * 1000 + a running counter
@@ -399,7 +405,8 @@ static void terrainNavHoldPublishDebug(void)
     DEBUG_SET(DEBUG_TERRAIN_NAV, 1, (flags & TERRAIN_NAV_DEBUG_FLAG_AGL_OK) ? aglCm : 0);
     DEBUG_SET(DEBUG_TERRAIN_NAV, 2, lroundf(navGetCurrentActualPositionAndVelocity()->pos.z));
     DEBUG_SET(DEBUG_TERRAIN_NAV, 3, lroundf(posControl.desiredState.pos.z));
-    DEBUG_SET(DEBUG_TERRAIN_NAV, 4, targetAglCm);
+    int32_t lineAglCm = 0;
+    DEBUG_SET(DEBUG_TERRAIN_NAV, 4, terrainNavMissionLineAglCm(&lineAglCm) ? lineAglCm : targetAglCm);
     DEBUG_SET(DEBUG_TERRAIN_NAV, 5, (int32_t)terrainNavHoldGetStatus());
     DEBUG_SET(DEBUG_TERRAIN_NAV, 6, (int32_t)terrainNavHoldGetWarning());
     DEBUG_SET(DEBUG_TERRAIN_NAV, 7, (int32_t)posControl.navState * 1000 + (int32_t)(cycle % 1000));
