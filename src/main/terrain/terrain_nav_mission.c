@@ -78,10 +78,20 @@ typedef struct {
     uint8_t wpQueryTries;
     timeMs_t wpQueryNextMs;
 
-    bool nextLegValid;          // the leg after this one is a terrain leg too
-    float nextNorthCm;          // its waypoint, in the local frame
+    bool nextRouteValid;        // the mission flies on to another waypoint after this one
+    int8_t nextIndex;           // that waypoint
+    float nextNorthCm;          // in the local frame
     float nextEastCm;
+    bool nextLegValid;          // and the leg to it is a terrain leg too
     int32_t nextMinAglCm;
+
+    // The turn guard (terrain_nav_mission_logic.h): the leg flown is not a terrain leg, but
+    // the turn onto it from a terrain leg is still being flown. It is tracked as a floor
+    // leg with the minimum of the terrain leg before
+    bool guard;
+    bool guardOnCourse;         // the aircraft is on course for the leg, since guardOnCourseMs
+    timeMs_t guardStartMs;
+    timeMs_t guardOnCourseMs;
 
     bool legChanged;            // set for the one cycle in which the leg changed
 
@@ -151,23 +161,59 @@ static void deactivate(bool keepTerrainTarget)
     if (!keepTerrainTarget) {
         mission.haveTerrainZ = false;
         mission.lineValid = false;
+        mission.nextRouteValid = false;
+        mission.nextLegValid = false;
+        mission.guard = false;
+    }
+}
+
+// The waypoint the mission flies to after the active one, as the navigation controller works
+// it out for its own turns (getLocalPosNextWaypoint in navigation.c: a JUMP is followed to
+// its target, or stepped over once its count is used up). -1: there is none, or what comes
+// next is not a waypoint the aircraft flies to as a leg (RTH, the end of the mission)
+static int nextFlownWaypointIndex(const navWaypoint_t *wp)
+{
+    const int last = posControl.startWpIndex + posControl.waypointCount - 1;
+    int index = posControl.activeWaypointIndex + 1;
+    if (wp->flag == NAV_WP_FLAG_LAST || index > last || index >= NAV_MAX_WAYPOINTS) {
+        return -1;
+    }
+
+    const navWaypoint_t *next = &posControl.waypointList[index];
+    if (next->action == NAV_WP_ACTION_JUMP) {
+        if (next->p3 != 0 || next->p2 == -1) {
+            index = next->p1 + posControl.startWpIndex;
+        } else if (index + 1 <= last && posControl.waypointList[index + 1].action != NAV_WP_ACTION_JUMP) {
+            index++;
+        } else {
+            return -1;
+        }
+        if (index < 0 || index > last || index >= NAV_MAX_WAYPOINTS) {
+            return -1;
+        }
+    }
+
+    switch (posControl.waypointList[index].action) {
+        case NAV_WP_ACTION_WAYPOINT:
+        case NAV_WP_ACTION_HOLD_TIME:
+        case NAV_WP_ACTION_LAND:
+            return index;
+        default:
+            return -1;
     }
 }
 
 static void setUpNextLeg(const navWaypoint_t *wp)
 {
+    mission.nextRouteValid = false;
     mission.nextLegValid = false;
 
-    const int nextIndex = posControl.activeWaypointIndex + 1;
-    if (wp->flag == NAV_WP_FLAG_LAST || nextIndex > posControl.startWpIndex + posControl.waypointCount - 1 || nextIndex >= NAV_MAX_WAYPOINTS) {
+    const int nextIndex = nextFlownWaypointIndex(wp);
+    if (nextIndex < 0) {
         return;
     }
 
     const navWaypoint_t *next = &posControl.waypointList[nextIndex];
-    const bool nextHasOptions = waypointHasTerrainOptions(next);
-    if (terrainNavMissionModeFromP3(nextHasOptions, next->p3) == TERRAIN_NAV_MISSION_OFF) {
-        return;
-    }
     // A waypoint without coordinates stands for the home position: not a
     // route the scan can follow
     if (next->lat == 0 && next->lon == 0) {
@@ -188,8 +234,72 @@ static void setUpNextLeg(const navWaypoint_t *wp)
 
     mission.nextNorthCm = nextPos.x;
     mission.nextEastCm = nextPos.y;
-    mission.nextMinAglCm = terrainNavMissionMinAglCm(nextHasOptions, next->p3, terrainNavConfig()->minAglCm);
-    mission.nextLegValid = true;
+    mission.nextIndex = nextIndex;
+    mission.nextRouteValid = true;
+
+    const bool nextHasOptions = waypointHasTerrainOptions(next);
+    if (terrainNavMissionModeFromP3(nextHasOptions, next->p3) != TERRAIN_NAV_MISSION_OFF) {
+        mission.nextMinAglCm = terrainNavMissionMinAglCm(nextHasOptions, next->p3, terrainNavConfig()->minAglCm);
+        mission.nextLegValid = true;
+    }
+}
+
+// True when the leg to the active waypoint, not a terrain leg itself, starts with the turn
+// guard: it is the waypoint the terrain leg just flown was followed by, and that run of
+// terrain legs had terrain targets (without terrain data the mission flies as stock)
+static bool guardStartsAtActiveWaypoint(void)
+{
+    return mission.haveTerrainZ && !mission.guard && mission.nextRouteValid
+        && mission.nextIndex == posControl.activeWaypointIndex;
+}
+
+// True when the turn guard is over: the aircraft has been on course for the leg for
+// TERRAIN_NAV_MISSION_ESTABLISHED_MS, or the guard has lasted as long as a turn can
+static bool guardEnds(timeMs_t currentTimeMs)
+{
+    const fpVector3_t *here = &navGetCurrentActualPositionAndVelocity()->pos;
+    const float toWpDeg = RADIANS_TO_DEGREES(atan2f(posControl.activeWaypoint.pos.y - here->y, posControl.activeWaypoint.pos.x - here->x));
+    navFwTurnArc_t arc;
+    navFwGetTurnArc(&arc);
+
+    if (terrainNavMissionOnCourse((float)posControl.actualState.cog * 0.01f, toWpDeg, navConfig()->fw.wp_tracking_accuracy > 0,
+                                  (float)posControl.activeWaypoint.bearing * 0.01f, arc.engaged)) {
+        if (!mission.guardOnCourse) {
+            mission.guardOnCourse = true;
+            mission.guardOnCourseMs = currentTimeMs;
+        } else if (currentTimeMs - mission.guardOnCourseMs >= TERRAIN_NAV_MISSION_ESTABLISHED_MS) {
+            return true;
+        }
+    } else {
+        mission.guardOnCourse = false;
+    }
+
+    return currentTimeMs - mission.guardStartMs >= terrainNavMissionGuardMaxMs(posControl.actualState.velXY, navFwGetPlanningBankDeg());
+}
+
+static void startLeg(const navWaypoint_t *wp, timeMs_t currentTimeMs)
+{
+    mission.active = true;
+    mission.wpIndex = posControl.activeWaypointIndex;
+    mission.lat = wp->lat;
+    mission.lon = wp->lon;
+    mission.alt = wp->alt;
+    mission.p3 = wp->p3;
+    mission.action = wp->action;
+    mission.wpTerrainValid = false;
+    mission.clearanceValid = false;
+    mission.wpQueryTries = 0;
+    mission.wpQueryNextMs = currentTimeMs;
+    mission.holdActive = false;
+    mission.legChanged = true;
+    // After a terrain leg of the same run the line goes on, and does not
+    // come down until this leg has its own answers: its look-ahead scan
+    // and, on a follow leg, its clearance (until then the leg holds
+    // minimum + margin). The answer of the leg before was measured from
+    // that leg's held height
+    mission.carryActive = mission.haveTerrainZ;
+    mission.carryStartMs = currentTimeMs;
+    mission.lineAnswerValid = false;
 }
 
 bool terrainNavMissionUpdate(timeMs_t currentTimeMs)
@@ -211,34 +321,35 @@ bool terrainNavMissionUpdate(timeMs_t currentTimeMs)
     const bool hasOptions = waypointHasTerrainOptions(wp);
     const terrainNavMissionMode_e mode = terrainNavMissionModeFromP3(hasOptions, wp->p3);
     if (mode == TERRAIN_NAV_MISSION_OFF) {
+        // Not a terrain leg. The turn onto it from a terrain leg is guarded: the floor of
+        // the leg before stays until the aircraft is on course for this one
+        if (mission.guard && matchesActiveWaypoint(wp)) {
+            if (guardEnds(currentTimeMs)) {
+                deactivate(false);
+                return false;
+            }
+            mission.active = true;
+            return true;
+        }
+        if (guardStartsAtActiveWaypoint()) {
+            startLeg(wp, currentTimeMs);
+            mission.mode = TERRAIN_NAV_MISSION_FLOOR;       // the minimum stays that of the terrain leg before
+            mission.guard = true;
+            mission.guardOnCourse = false;
+            mission.guardStartMs = currentTimeMs;
+            mission.nextRouteValid = false;                 // what follows this leg is not the guard's to scan
+            mission.nextLegValid = false;
+            return true;
+        }
         deactivate(false);
         return false;
     }
 
-    if (!mission.active || !matchesActiveWaypoint(wp)) {
-        mission.active = true;
-        mission.wpIndex = posControl.activeWaypointIndex;
-        mission.lat = wp->lat;
-        mission.lon = wp->lon;
-        mission.alt = wp->alt;
-        mission.p3 = wp->p3;
-        mission.action = wp->action;
+    if (!mission.active || mission.guard || !matchesActiveWaypoint(wp)) {
+        startLeg(wp, currentTimeMs);
         mission.mode = mode;
         mission.minAglCm = terrainNavMissionMinAglCm(hasOptions, wp->p3, terrainNavConfig()->minAglCm);
-        mission.wpTerrainValid = false;
-        mission.clearanceValid = false;
-        mission.wpQueryTries = 0;
-        mission.wpQueryNextMs = currentTimeMs;
-        mission.holdActive = false;
-        mission.legChanged = true;
-        // After a terrain leg of the same run the line goes on, and does not
-        // come down until this leg has its own answers: its look-ahead scan
-        // and, on a follow leg, its clearance (until then the leg holds
-        // minimum + margin). The answer of the leg before was measured from
-        // that leg's held height
-        mission.carryActive = mission.haveTerrainZ;
-        mission.carryStartMs = currentTimeMs;
-        mission.lineAnswerValid = false;
+        mission.guard = false;
         setUpNextLeg(wp);
     }
 
@@ -252,7 +363,8 @@ bool terrainNavMissionLegChanged(void)
 
 bool terrainNavMissionResolveWaypoint(timeMs_t currentTimeMs)
 {
-    if (!mission.active || mission.wpTerrainValid) {
+    // The turn guard ends long before its waypoint: the terrain there is not needed
+    if (!mission.active || mission.wpTerrainValid || mission.guard) {
         return false;
     }
 
@@ -319,29 +431,82 @@ bool terrainNavMissionLookaheadStart(float distanceM, float groundSpeedCmS, floa
     terrainNavBand_t band;
     terrainNavBandFromBank(groundSpeedCmS, planningBankDeg, &band);
 
-    terrainNavMissionPath_t path;
+    terrainNavMissionPath_t path = { 0 };
     // (CENTIMETERS_TO_METERS does not bracket its argument: take the difference first)
     const float toWpNorthCm = posControl.activeWaypoint.pos.x - here->x;
     const float toWpEastCm = posControl.activeWaypoint.pos.y - here->y;
     path.wpNorthM = CENTIMETERS_TO_METERS(toWpNorthCm);
     path.wpEastM = CENTIMETERS_TO_METERS(toWpEastCm);
-    // What lies past the waypoint may not be a terrain leg (a stock leg, a
-    // landing, RTH, a jump, the end of the mission): then the scan stops at
-    // the waypoint and never reacts to ground the route does not cross
-    path.nextLegValid = mission.nextLegValid;
+    // Where the mission flies on to another waypoint the lanes go round the corner. If the
+    // leg to it is a terrain leg they follow it; if not they end once they are on course for
+    // it: the turn is this leg's, what the next leg crosses is not (the turn zone). Past a
+    // waypoint the mission does not fly on from (RTH, its end) the scan stops at the waypoint
+    path.nextLegValid = mission.nextRouteValid;
+    path.turnZoneOnly = mission.guard || (mission.nextRouteValid && !mission.nextLegValid);
+    path.guard = mission.guard;
     const float toNextNorthCm = mission.nextNorthCm - here->x;
     const float toNextEastCm = mission.nextEastCm - here->y;
     path.nextWpNorthM = CENTIMETERS_TO_METERS(toNextNorthCm);
     path.nextWpEastM = CENTIMETERS_TO_METERS(toNextEastCm);
+
+    // The lanes fly the turn as the controller will. With the waypoint tracker on, the
+    // aircraft heads for the leg's line, not for the waypoint
+    const bool tracking = navConfig()->fw.wp_tracking_accuracy > 0;
+    const float legCourseDeg = (float)posControl.activeWaypoint.bearing * 0.01f;
+    path.speedMS = groundSpeedCmS * 0.01f;
+    path.trackMaxAngleDeg = navConfig()->fw.wp_tracking_max_angle;
+    path.trackLine = tracking;
+    path.lineCourseDeg = legCourseDeg;
+    if (mission.nextRouteValid) {
+        path.nextTrackLine = tracking;
+        path.nextLineCourseDeg = RADIANS_TO_DEGREES(atan2f(mission.nextEastCm - posControl.activeWaypoint.pos.y,
+                                                           mission.nextNorthCm - posControl.activeWaypoint.pos.x));
+    }
+
+    // COORD_FLYINTO swings away from the corner ahead of the waypoint. While its S is flown
+    // the lanes take the controller's own two arcs; before, the plan it will make
+    navFwTurnArc_t arc;
+    navFwGetTurnArc(&arc);
+    const float turnAngleDeg = (float)posControl.activeWaypoint.nextTurnAngle * 0.01f;
+    if (navConfig()->fw.wp_turn_mode == NAV_FW_WP_TURN_COORD_FLY_INTO && !mission.guard
+        && mission.action != NAV_WP_ACTION_HOLD_TIME && posControl.activeWaypoint.nextTurnAngle != -1) {
+        const bool onMainArc = arc.engaged && !arc.secondStaged
+            && fabsf(terrainNavMissionWrap180((float)arc.outBearing * 0.01f - (legCourseDeg + turnAngleDeg))) < 5.0f;
+        if (arc.engaged && arc.secondStaged) {
+            path.flyInto = true;
+            path.flyIntoDir = arc.secondDir;
+            path.flyIntoGapSteps = 0;
+            path.flyIntoTriggerM = 1.0e9f;      // begun
+            path.flyIntoCounterEndDeg = terrainNavMissionWrap180((float)arc.outBearing * 0.01f);
+            path.flyIntoOutCourseDeg = terrainNavMissionWrap180((float)arc.secondOutBearing * 0.01f);
+        } else if (!onMainArc) {
+            terrainNavMissionFlyIntoPlan(&path, legCourseDeg, turnAngleDeg, terrainNavMissionTurnRadiusM(groundSpeedCmS, planningBankDeg),
+                                         path.speedMS, navFwGetTurnEaseMs() * 0.001f);
+        }
+    }
+    // An arc the turn coordinator is flying onto this leg is flown on, the way it goes round
+    if (arc.engaged && !(path.flyInto && arc.secondStaged)) {
+        path.arc = true;
+        path.arcDir = arc.dir;
+        path.arcOutCourseDeg = terrainNavMissionWrap180((float)arc.outBearing * 0.01f);
+    }
     // The lanes leave for the next waypoint where the controller will switch to it: the
     // fly-by lead before the waypoint. A waypoint the aircraft holds at is flown to
     const bool flyBy = navConfig()->fw.wp_turn_mode == NAV_FW_WP_TURN_COORD_FLY_BY
         && mission.action != NAV_WP_ACTION_HOLD_TIME
         && posControl.activeWaypoint.nextTurnAngle != -1;
-    path.switchDistM = terrainNavMissionSwitchDistM(flyBy, CENTIDEGREES_TO_DEGREES((float)posControl.activeWaypoint.nextTurnAngle),
-                                                    terrainNavMissionTurnRadiusM(groundSpeedCmS, planningBankDeg), groundSpeedCmS,
-                                                    (float)navConfig()->fw.wp_turn_max_lead_time,
-                                                    CENTIMETERS_TO_METERS((float)navConfig()->general.waypoint_radius));
+    // From its switch on COORD_FLYBY flies an arc onto the next leg's course, for any turn
+    // its coordinator flies an arc for
+    if (flyBy && mission.nextRouteValid && fabsf(turnAngleDeg) > TERRAIN_NAV_MISSION_FLYINTO_MIN_DEG) {
+        path.nextArc = true;
+        path.nextArcDir = (turnAngleDeg > 0.0f) ? 1 : -1;
+        path.nextArcCourseDeg = terrainNavMissionWrap180(legCourseDeg + turnAngleDeg);
+    }
+    path.switchDistM = terrainNavMissionSwitchDistEaseM(flyBy, turnAngleDeg,
+                                                        terrainNavMissionTurnRadiusM(groundSpeedCmS, planningBankDeg), groundSpeedCmS,
+                                                        (float)navConfig()->fw.wp_turn_max_lead_time,
+                                                        CENTIMETERS_TO_METERS((float)navConfig()->general.waypoint_radius),
+                                                        navFwGetTurnEaseMs());
 
     const float nextExtraRiseM = mission.nextLegValid
         ? terrainNavMissionTurnExtraRiseM(mission.minAglCm, mission.nextMinAglCm)
@@ -357,9 +522,15 @@ bool terrainNavMissionLookaheadStart(float distanceM, float groundSpeedCmS, floa
         lineStartM = CENTIMETERS_TO_METERS(lineAboveHeldCm);
     }
     const float lineViewCm = groundSpeedCmS * TERRAIN_NAV_MISSION_VIEW_S;
-    const float lineNextExtraM = mission.nextLegValid
-        ? terrainNavMissionLineNextExtraM(commandedAglCm(), mission.nextMinAglCm, TERRAIN_NAV_HOLD_RECOVER_MARGIN_CM)
-        : 0.0f;
+    // Past the waypoint the line is aimed at the next leg's minimum + margin; in the turn
+    // zone of a leg that is not a terrain leg, at this leg's: a floor, never a follow
+    // leg's clearance
+    float lineNextExtraM = 0.0f;
+    if (mission.nextLegValid) {
+        lineNextExtraM = terrainNavMissionLineNextExtraM(commandedAglCm(), mission.nextMinAglCm, TERRAIN_NAV_HOLD_RECOVER_MARGIN_CM);
+    } else if (mission.nextRouteValid) {
+        lineNextExtraM = terrainNavMissionLineNextExtraM(commandedAglCm(), mission.minAglCm, TERRAIN_NAV_HOLD_RECOVER_MARGIN_CM);
+    }
     mission.lineScanSpeedCmS = groundSpeedCmS;
 
     return terrainNavLookaheadRouteStart(&path, &band, CENTIDEGREES_TO_DEGREES((float)posControl.actualState.cog), distanceM,
@@ -498,7 +669,8 @@ uint32_t terrainNavMissionDebugFlags(void)
         return 0;
     }
 
-    uint32_t flags = (1 << 3) | (((uint32_t)mission.mode & 3) << 4);
+    // The turn guard shows as mode 3, which no waypoint can ask for
+    uint32_t flags = (1 << 3) | ((mission.guard ? 3 : ((uint32_t)mission.mode & 3)) << 4);
     if (mission.clearanceValid) {
         flags |= (1 << 6);
     }
@@ -522,7 +694,8 @@ static bool trackingActiveWaypoint(void)
     return matchesActiveWaypoint(&posControl.waypointList[posControl.activeWaypointIndex]);
 }
 
-// The active waypoint asks for a terrain mode, whether or not the gate tracks it yet
+// The active waypoint asks for a terrain mode, or its leg starts with the turn guard, whether
+// or not the gate tracks it yet
 static bool activeWaypointIsTerrainLeg(void)
 {
     if (!STATE(AIRPLANE) || !ARMING_FLAG(ARMED)) {
@@ -532,7 +705,8 @@ static bool activeWaypointIsTerrainLeg(void)
         return false;
     }
     const navWaypoint_t *wp = &posControl.waypointList[posControl.activeWaypointIndex];
-    return terrainNavMissionModeFromP3(waypointHasTerrainOptions(wp), wp->p3) != TERRAIN_NAV_MISSION_OFF;
+    return terrainNavMissionModeFromP3(waypointHasTerrainOptions(wp), wp->p3) != TERRAIN_NAV_MISSION_OFF
+        || guardStartsAtActiveWaypoint();
 }
 
 float terrainNavMissionAdjustTargetZ(float stockZCm)
@@ -558,8 +732,9 @@ float terrainNavMissionAdjustTargetZ(float stockZCm)
 
 float terrainNavMissionWaypointZ(float stockWpZCm)
 {
-    // Without usable terrain data the stored altitude is all there is
-    if (!trackingActiveWaypoint() || !mission.holdActive) {
+    // Without usable terrain data the stored altitude is all there is. A leg under the turn
+    // guard is not a terrain leg: it ends at its stored altitude
+    if (!trackingActiveWaypoint() || !mission.holdActive || mission.guard) {
         return stockWpZCm;
     }
 

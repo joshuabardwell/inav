@@ -1286,6 +1286,21 @@ static void updateFwTurnArc(timeDelta_t deltaMicros)
     fwTurn.arc.active = true;
 }
 
+void navFwGetTurnArc(navFwTurnArc_t *arc)
+{
+    arc->engaged = fwTurn.arc.engaged;
+    arc->dir = fwTurn.arc.dir;
+    arc->outBearing = fwTurn.arc.outBearing;
+    arc->secondStaged = fwTurn.arc.engaged && fwTurn.s.stage == FW_INTO_AWAY;
+    arc->secondDir = fwTurn.s.dir;
+    arc->secondOutBearing = fwTurn.s.bOut;
+}
+
+float navFwGetTurnEaseMs(void)
+{
+    return fwTurnEaseTimeMs(getFwPlanningBankDeg());
+}
+
 // Loiter circle controller: once established, the steady arc law replaces the carrot PID to hold the radius exactly
 static void updateFwLoiterArc(timeDelta_t deltaMicros)
 {

@@ -448,11 +448,12 @@ static inline float terrainNavMissionMaxTurnPerStepDeg(float radiusM)
 //   flyBy          nav_fw_wp_turn_mode is COORD_FLYBY and the waypoint is not a hold
 //   turnAngleDeg   change of course at the waypoint
 //   radiusM        the turn radius at the controller's planning bank
-// FLY_BY starts the turn R tan(turn / 2) early, never more than maxLeadMs of flight (the
-// controller adds a roll-in lead of a few tens of metres, left out here: the band is wider
-// than that). Every other case switches at the waypoint radius
-static inline float terrainNavMissionSwitchDistM(bool flyBy, float turnAngleDeg, float radiusM, float groundSpeedCmS,
-                                                 float maxLeadMs, float wpRadiusM)
+//   easeMs         the controller's roll ease time
+// FLY_BY starts the turn R tan(turn / 2) early, plus the distance its roll-in takes (1.5 x
+// the ease time of flight, as the controller counts it), never more than maxLeadMs of
+// flight. Every other case switches at the waypoint radius
+static inline float terrainNavMissionSwitchDistEaseM(bool flyBy, float turnAngleDeg, float radiusM, float groundSpeedCmS,
+                                                     float maxLeadMs, float wpRadiusM, float easeMs)
 {
     float distM = wpRadiusM;
     const float angleDeg = fabsf(turnAngleDeg);
@@ -461,7 +462,8 @@ static inline float terrainNavMissionSwitchDistM(bool flyBy, float turnAngleDeg,
         if (halfTan > TERRAIN_NAV_MISSION_LEAD_TAN_MAX) {
             halfTan = TERRAIN_NAV_MISSION_LEAD_TAN_MAX;
         }
-        float leadM = ((radiusM < TERRAIN_NAV_MISSION_PLAN_RADIUS_MAX_M) ? radiusM : TERRAIN_NAV_MISSION_PLAN_RADIUS_MAX_M) * halfTan;
+        float leadM = 1.5f * groundSpeedCmS * 0.01f * easeMs * 0.001f
+            + ((radiusM < TERRAIN_NAV_MISSION_PLAN_RADIUS_MAX_M) ? radiusM : TERRAIN_NAV_MISSION_PLAN_RADIUS_MAX_M) * halfTan;
         const float maxLeadM = groundSpeedCmS * 0.01f * maxLeadMs * 0.001f;
         if (leadM > maxLeadM) {
             leadM = maxLeadM;
@@ -473,6 +475,53 @@ static inline float terrainNavMissionSwitchDistM(bool flyBy, float turnAngleDeg,
     return distM;
 }
 
+// The same without the roll-in
+static inline float terrainNavMissionSwitchDistM(bool flyBy, float turnAngleDeg, float radiusM, float groundSpeedCmS,
+                                                 float maxLeadMs, float wpRadiusM)
+{
+    return terrainNavMissionSwitchDistEaseM(flyBy, turnAngleDeg, radiusM, groundSpeedCmS, maxLeadMs, wpRadiusM, 0.0f);
+}
+
+/*
+ * The turn at the end of a terrain leg (the turn zone, the turn guard).
+ *
+ * The route goes on past the waypoint whatever the next leg is, and the aircraft turns onto
+ * it over ground that neither leg crosses: outside the corner where it flies over the
+ * waypoint first, inside it where it cuts the corner, and on the far side of the leg before
+ * the waypoint where COORD_FLYINTO swings out (nav_fw_wp_turn_mode). So a terrain leg scans
+ * that turn too, and keeps its floor (minimum + margin, never a follow leg's clearance) from
+ * the navigation controller's switch to the next waypoint until the aircraft is established
+ * on the next leg (terrainNavMissionOnCourse). When the next leg is not a terrain leg the
+ * lanes end there (turnZoneOnly): what the stock leg then flies over is the pilot's choice.
+ *
+ * The lanes fly the turn the way the controller does:
+ *   the tracker    with nav_fw_wp_tracking_accuracy the aircraft does not head for the next
+ *                  waypoint but for the leg's line, at the course that closes its distance
+ *                  from the line in TERRAIN_NAV_MISSION_TRACK_CLOSE_S (trackLine)
+ *   the S          COORD_FLYINTO: a counter arc away from the corner, a short straight and
+ *                  the main arc, which crosses the waypoint on the outbound course
+ *                  (terrainNavMissionFlyIntoPlan)
+ *   the arc        an arc the turn coordinator is flying when the scan starts is flown on
+ *                  the same way round, the long way if that is the arc's (arc)
+ */
+
+// Steps a lane flies on, straight, once it has come round onto its course, before a
+// turn-zone lane ends: the roll-out
+#define TERRAIN_NAV_MISSION_TURN_ZONE_SETTLE_STEPS  3
+// The waypoint tracker closes a cross-track error in about this long
+// (navigation_fixedwing.c: desiredApproachSpeed = navCrossTrackError / 3)
+#define TERRAIN_NAV_MISSION_TRACK_CLOSE_S       3.0f
+// Its steepest course onto the line when none is given (nav_fw_wp_tracking_max_angle)
+#define TERRAIN_NAV_MISSION_TRACK_MAX_ANGLE_DEG 60.0f
+// COORD_FLYINTO flies its S for turns sharper than this (NAV_FW_ARC_MIN_TURN_ANGLE_CD)
+#define TERRAIN_NAV_MISSION_FLYINTO_MIN_DEG     30.0f
+// Established on a leg: the course over ground this close to where the leg leads, for this long
+#define TERRAIN_NAV_MISSION_ESTABLISHED_DEG     15.0f
+#define TERRAIN_NAV_MISSION_ESTABLISHED_MS      2000
+// A turn guard ends in any case after a full circle at half the planning bank, within these
+#define TERRAIN_NAV_MISSION_GUARD_MIN_MS        20000
+#define TERRAIN_NAV_MISSION_GUARD_MAX_MS        90000
+
 typedef struct {
     float wpNorthM;             // the active waypoint, from where the scan starts
     float wpEastM;
@@ -480,6 +529,28 @@ typedef struct {
     bool nextLegValid;          // the route continues past the waypoint
     float nextWpNorthM;         // the next waypoint, from where the scan starts
     float nextWpEastM;
+
+    // The turn. All of it is off when left at zero
+    bool turnZoneOnly;          // past the waypoint a lane ends once it has come round onto its course
+    bool guard;                 // the same on the way to the active waypoint: the turn onto this leg is still being flown
+    bool trackLine;             // the tracker holds the aircraft on the line into the active waypoint, course lineCourseDeg
+    float lineCourseDeg;
+    bool nextTrackLine;         // the same for the leg after it
+    float nextLineCourseDeg;
+    float speedMS;              // ground speed the tracker's course is worked out with
+    float trackMaxAngleDeg;     // nav_fw_wp_tracking_max_angle; 0: TERRAIN_NAV_MISSION_TRACK_MAX_ANGLE_DEG
+    bool flyInto;               // COORD_FLYINTO's S ahead of the active waypoint (terrainNavMissionFlyIntoPlan)
+    int8_t flyIntoDir;          // the main arc's direction, +1 right
+    uint8_t flyIntoGapSteps;    // straight steps between the two arcs
+    float flyIntoTriggerM;      // the S starts this far before the waypoint
+    float flyIntoCounterEndDeg; // the course the counter arc ends on
+    float flyIntoOutCourseDeg;  // the outbound course
+    bool arc;                   // the turn coordinator is flying an arc onto the active leg (not an S's counter arc)
+    int8_t arcDir;              // its direction, +1 right
+    float arcOutCourseDeg;      // the course it ends on
+    bool nextArc;               // it will fly an arc onto the next leg from the switch on (COORD_FLYBY)
+    int8_t nextArcDir;
+    float nextArcCourseDeg;     // the next leg's course
 } terrainNavMissionPath_t;
 
 typedef struct {
@@ -489,6 +560,11 @@ typedef struct {
     bool pastWaypoint;          // flying to the next waypoint
     bool turning;               // the last step was flown banked
     float wantedTurnDeg;        // course change the last step asked for, before the lane's limit (>= 0)
+    uint8_t settled;            // steps flown straight on course in the turn zone
+    uint8_t into;               // COORD_FLYINTO's S: 0 not begun, 1 counter arc, 2 straight, 3 main arc
+    uint8_t gap;                // straight steps of the S left
+    bool arcDone;               // the coordinator's arc is flown
+    uint8_t nextArc;            // the arc onto the next leg: 0 not begun, 1 being flown, 2 flown
 } terrainNavMissionPathState_t;
 
 static inline void terrainNavMissionPathStart(terrainNavMissionPathState_t *state, float courseDeg)
@@ -499,17 +575,202 @@ static inline void terrainNavMissionPathStart(terrainNavMissionPathState_t *stat
     state->pastWaypoint = false;
     state->turning = false;
     state->wantedTurnDeg = 0.0f;
+    state->settled = 0;
+    state->into = 0;
+    state->gap = 0;
+    state->arcDone = false;
+    state->nextArc = 0;
+}
+
+// The course a lane wants on the way to a point toNorthM, toEastM from it. With the leg's line
+// given (trackLine) and the point roughly ahead, that is the tracker's course onto the line:
+// the leg's course turned toward the line by the angle that closes the cross-track error in
+// TERRAIN_NAV_MISSION_TRACK_CLOSE_S, at most the tracker's limit. Otherwise straight at the point
+static inline float terrainNavMissionWantedCourseDeg(float courseDeg, float toNorthM, float toEastM, bool trackLine,
+                                                     float lineCourseDeg, float speedMS, float trackMaxAngleDeg)
+{
+    const float directDeg = atan2f(toEastM, toNorthM) * 57.29578f;
+    if (!trackLine || fabsf(terrainNavMissionWrap180(directDeg - courseDeg)) >= 90.0f) {
+        return directDeg;
+    }
+
+    const float lineRad = lineCourseDeg * 0.017453293f;
+    const float crossTrackM = sinf(lineRad) * toNorthM - cosf(lineRad) * toEastM;     // + = right of the line
+    const float speed = (speedMS > 5.0f) ? speedMS : 5.0f;
+    const float sinMax = sinf(((trackMaxAngleDeg > 0.0f) ? trackMaxAngleDeg : TERRAIN_NAV_MISSION_TRACK_MAX_ANGLE_DEG) * 0.017453293f);
+    float sinAngle = fabsf(crossTrackM) / (TERRAIN_NAV_MISSION_TRACK_CLOSE_S * speed);
+    if (sinAngle > sinMax) {
+        sinAngle = sinMax;
+    }
+    const float angleDeg = asinf(sinAngle) * 57.29578f;
+    return (crossTrackM > 0.0f) ? lineCourseDeg - angleDeg : lineCourseDeg + angleDeg;
+}
+
+// COORD_FLYINTO's S ahead of a waypoint, as the controller plans it (fwArcPlanFlyInto): the
+// main circle pinned at the waypoint, the counter circle on the inbound leg, the two apart
+// by the roll swing's room.
+//   inCourseDeg   course of the leg into the waypoint;  turnDeg   change of course there, + right
+//   radiusM       turn radius at the controller's planning bank;  easeS   its roll ease time
+// Sets the path's flyInto fields; flyInto stays false where the controller flies no S
+static inline void terrainNavMissionFlyIntoPlan(terrainNavMissionPath_t *path, float inCourseDeg, float turnDeg, float radiusM,
+                                                float speedMS, float easeS)
+{
+    path->flyInto = false;
+    if (!(fabsf(turnDeg) > TERRAIN_NAV_MISSION_FLYINTO_MIN_DEG)) {
+        return;
+    }
+
+    const float dir = (turnDeg > 0.0f) ? 1.0f : -1.0f;
+    const float inRad = inCourseDeg * 0.017453293f;
+    const float outRad = (inCourseDeg + turnDeg) * 0.017453293f;
+    const float halfPi = 1.5707963f;
+    const float gapM = 2.0f * speedMS * easeS;
+    const float mainN = radiusM * cosf(outRad + dir * halfPi);
+    const float mainE = radiusM * sinf(outRad + dir * halfPi);
+    const float legN = radiusM * cosf(inRad - dir * halfPi);
+    const float legE = radiusM * sinf(inRad - dir * halfPi);
+    const float wN = mainN - legN;
+    const float wE = mainE - legE;
+    const float wAlong = wN * cosf(inRad) + wE * sinf(inRad);
+    const float disc = wAlong * wAlong - (wN * wN + wE * wE) + 4.0f * radiusM * radiusM + gapM * gapM;
+    if (!(disc > 0.0f)) {
+        return;
+    }
+    const float startM = wAlong - sqrtf(disc);      // where the S starts, along the leg from the waypoint
+    if (!(startM < 0.0f)) {
+        return;
+    }
+
+    const float counterN = legN + startM * cosf(inRad);
+    const float counterE = legE + startM * sinf(inRad);
+    const float centresRad = atan2f(mainE - counterE, mainN - counterN);
+    const float betaRad = atan2f(gapM, 2.0f * radiusM);
+    const float gapSteps = roundf(gapM / TERRAIN_NAV_MISSION_PATH_STEP_M);
+
+    path->flyInto = true;
+    path->flyIntoDir = (int8_t)dir;
+    path->flyIntoGapSteps = (gapSteps < 255.0f) ? (uint8_t)gapSteps : 255;
+    path->flyIntoTriggerM = -startM + 1.5f * speedMS * easeS;       // the controller's roll-in lead (fwRollInLeadCm)
+    path->flyIntoCounterEndDeg = terrainNavMissionWrap180((centresRad - dir * (halfPi - betaRad)) * 57.29578f);
+    path->flyIntoOutCourseDeg = terrainNavMissionWrap180(inCourseDeg + turnDeg);
+}
+
+// One step of a lane's course on a forced turn: toward courseDeg in direction dir, the long
+// way round if need be. True once the lane is on that course
+static inline bool terrainNavMissionForcedTurn(terrainNavMissionPathState_t *state, float courseDeg, int dir, float maxTurnDeg)
+{
+    float leftDeg = (float)dir * terrainNavMissionWrap180(courseDeg - state->courseDeg);
+    if (leftDeg < -maxTurnDeg) {
+        leftDeg += 360.0f;
+    }
+    float turnDeg = (leftDeg < maxTurnDeg) ? leftDeg : maxTurnDeg;
+    if (turnDeg < 0.0f) {
+        turnDeg = 0.0f;
+    }
+    state->wantedTurnDeg = fabsf(leftDeg);
+    state->turning = true;
+    state->courseDeg = terrainNavMissionWrap180(state->courseDeg + (float)dir * turnDeg);
+    return leftDeg <= maxTurnDeg;
+}
+
+static inline void terrainNavMissionPathMove(terrainNavMissionPathState_t *state, float *stepNorthM, float *stepEastM)
+{
+    const float courseRad = state->courseDeg * 0.017453293f;
+    *stepNorthM = cosf(courseRad) * TERRAIN_NAV_MISSION_PATH_STEP_M;
+    *stepEastM = sinf(courseRad) * TERRAIN_NAV_MISSION_PATH_STEP_M;
+    state->northM += *stepNorthM;
+    state->eastM += *stepEastM;
+}
+
+// True while the aircraft is on course for the leg it flies: no arc of the turn coordinator
+// in progress, and its course over ground within TERRAIN_NAV_MISSION_ESTABLISHED_DEG of the
+// bearing to the waypoint and, with the tracker on, of the leg's course. Held for
+// TERRAIN_NAV_MISSION_ESTABLISHED_MS it ends a turn guard
+static inline bool terrainNavMissionOnCourse(float courseDeg, float toWpDeg, bool trackLine, float lineCourseDeg, bool arcActive)
+{
+    if (arcActive || fabsf(terrainNavMissionWrap180(toWpDeg - courseDeg)) > TERRAIN_NAV_MISSION_ESTABLISHED_DEG) {
+        return false;
+    }
+    return !trackLine || fabsf(terrainNavMissionWrap180(lineCourseDeg - courseDeg)) <= TERRAIN_NAV_MISSION_ESTABLISHED_DEG;
+}
+
+// The longest a turn guard lasts, in ms: the time of a full circle at half the planning bank,
+// 2 pi v / (g tan(bank / 2)). A turn that takes longer is not the turn at the waypoint
+static inline uint32_t terrainNavMissionGuardMaxMs(float groundSpeedCmS, float planningBankDeg)
+{
+    const float tanHalf = tanf(planningBankDeg * 0.5f * 0.017453293f);
+    float ms = TERRAIN_NAV_MISSION_GUARD_MAX_MS;
+    if (tanHalf > 0.01f) {
+        ms = 6.2831853f * groundSpeedCmS * 0.01f / (9.80665f * tanHalf) * 1000.0f;
+    }
+    if (ms < TERRAIN_NAV_MISSION_GUARD_MIN_MS) {
+        ms = TERRAIN_NAV_MISSION_GUARD_MIN_MS;
+    } else if (ms > TERRAIN_NAV_MISSION_GUARD_MAX_MS) {
+        ms = TERRAIN_NAV_MISSION_GUARD_MAX_MS;
+    }
+    return (uint32_t)ms;
 }
 
 // Moves a lane one step on, its course changing by at most maxTurnDeg. Returns false,
 // without moving, when the lane ends: at the active waypoint when no leg follows, else at
-// the next waypoint (the scan knows the route no further). *stepNorthM, *stepEastM: the move
+// the next waypoint (the scan knows the route no further), or in the turn zone once the lane
+// is on its course. *stepNorthM, *stepEastM: the move
 static inline bool terrainNavMissionPathStep(terrainNavMissionPathState_t *state, const terrainNavMissionPath_t *path,
                                              float maxTurnDeg, float *stepNorthM, float *stepEastM)
 {
     const float stepSq = TERRAIN_NAV_MISSION_PATH_STEP_M * TERRAIN_NAV_MISSION_PATH_STEP_M;
 
     state->turning = false;
+
+    // The arc the turn coordinator is flying, before anything else
+    if (path->arc && !state->arcDone) {
+        if (terrainNavMissionForcedTurn(state, path->arcOutCourseDeg, path->arcDir, maxTurnDeg)) {
+            state->arcDone = true;
+        }
+        terrainNavMissionPathMove(state, stepNorthM, stepEastM);
+        return true;
+    }
+
+    // The arc onto the next leg, begun at the switch
+    if (state->nextArc == 1) {
+        if (terrainNavMissionForcedTurn(state, path->nextArcCourseDeg, path->nextArcDir, maxTurnDeg)) {
+            state->nextArc = 2;
+        }
+        terrainNavMissionPathMove(state, stepNorthM, stepEastM);
+        return true;
+    }
+
+    // COORD_FLYINTO's S ahead of the active waypoint
+    if (!state->pastWaypoint && path->flyInto && state->into == 0) {
+        const float toWpNorthM = path->wpNorthM - state->northM;
+        const float toWpEastM = path->wpEastM - state->eastM;
+        if (toWpNorthM * toWpNorthM + toWpEastM * toWpEastM < path->flyIntoTriggerM * path->flyIntoTriggerM) {
+            state->into = 1;
+        }
+    }
+    if (!state->pastWaypoint && state->into > 0) {
+        if (state->into == 1) {
+            if (terrainNavMissionForcedTurn(state, path->flyIntoCounterEndDeg, -path->flyIntoDir, maxTurnDeg)) {
+                state->into = 2;
+                state->gap = path->flyIntoGapSteps;
+            }
+        } else if (state->into == 2) {
+            state->wantedTurnDeg = 0.0f;
+            if (state->gap == 0) {
+                state->into = 3;
+            } else {
+                state->gap--;
+            }
+        }
+        if (state->into == 3 && terrainNavMissionForcedTurn(state, path->flyIntoOutCourseDeg, path->flyIntoDir, maxTurnDeg)) {
+            if (!path->nextLegValid) {
+                return false;
+            }
+            state->pastWaypoint = true;
+        }
+        terrainNavMissionPathMove(state, stepNorthM, stepEastM);
+        return true;
+    }
 
     if (!state->pastWaypoint) {
         const float toWpNorthM = path->wpNorthM - state->northM;
@@ -522,6 +783,12 @@ static inline bool terrainNavMissionPathStep(terrainNavMissionPathState_t *state
                 return false;
             }
             state->pastWaypoint = true;
+            if (path->nextArc) {
+                // The coordinator's arc onto the next leg's course starts here
+                state->nextArc = terrainNavMissionForcedTurn(state, path->nextArcCourseDeg, path->nextArcDir, maxTurnDeg) ? 2 : 1;
+                terrainNavMissionPathMove(state, stepNorthM, stepEastM);
+                return true;
+            }
         }
     }
 
@@ -531,7 +798,10 @@ static inline bool terrainNavMissionPathStep(terrainNavMissionPathState_t *state
         return false;
     }
 
-    const float wantDeg = atan2f(toEastM, toNorthM) * 57.29578f;
+    const bool tracked = state->pastWaypoint ? path->nextTrackLine : path->trackLine;
+    const float lineCourseDeg = state->pastWaypoint ? path->nextLineCourseDeg : path->lineCourseDeg;
+    const float wantDeg = terrainNavMissionWantedCourseDeg(state->courseDeg, toNorthM, toEastM, tracked, lineCourseDeg,
+                                                           path->speedMS, path->trackMaxAngleDeg);
     const float errorDeg = terrainNavMissionWrap180(wantDeg - state->courseDeg);
     float turnDeg = errorDeg;
     if (turnDeg > maxTurnDeg) {
@@ -541,13 +811,20 @@ static inline bool terrainNavMissionPathStep(terrainNavMissionPathState_t *state
     }
     state->wantedTurnDeg = fabsf(errorDeg);
     state->turning = state->wantedTurnDeg > TERRAIN_NAV_MISSION_TURNING_DEG;
+    if (path->turnZoneOnly && (state->pastWaypoint || path->guard)) {
+        // The turn zone: the lane ends once it has flown the roll-out on its course, as the
+        // turn guard judges it: not turning and, with the tracker on, on the leg's course,
+        // not still on its way to the leg's line
+        const bool onCourse = !state->turning
+            && (!tracked || fabsf(terrainNavMissionWrap180(lineCourseDeg - state->courseDeg)) <= TERRAIN_NAV_MISSION_ESTABLISHED_DEG);
+        state->settled = onCourse ? state->settled + 1 : 0;
+        if (state->settled > TERRAIN_NAV_MISSION_TURN_ZONE_SETTLE_STEPS) {
+            return false;
+        }
+    }
     state->courseDeg = terrainNavMissionWrap180(state->courseDeg + turnDeg);
 
-    const float courseRad = state->courseDeg * 0.017453293f;
-    *stepNorthM = cosf(courseRad) * TERRAIN_NAV_MISSION_PATH_STEP_M;
-    *stepEastM = sinf(courseRad) * TERRAIN_NAV_MISSION_PATH_STEP_M;
-    state->northM += *stepNorthM;
-    state->eastM += *stepEastM;
+    terrainNavMissionPathMove(state, stepNorthM, stepEastM);
     return true;
 }
 
