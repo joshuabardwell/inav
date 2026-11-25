@@ -46,6 +46,10 @@ typedef struct {
     uint8_t samplesMissed;  // points that had no terrain data (loads were scheduled)
     uint8_t bandSamples;    // mission scan: points sampled beside the first lane
     uint16_t bandSkipped;   // mission scan: band points left out (sample or block budget)
+    bool lineValid;         // mission scan: lineSlope holds an answer
+    bool lineMissed;        // mission scan: a point within the line's view had no data
+    float lineSlope;        // mission scan: the steepest line a point in view needs (terrain_nav_mission_logic.h)
+    float lineTopM;         // mission scan: the highest ground in view, above the ground at the start
 } terrainNavLookaheadResult_t;
 
 // True only while terrain data is usable: module enabled, no IO failure
@@ -81,9 +85,11 @@ bool terrainNavLookahead(float bearingDeg, float distanceM, float climbRatio, fl
 // The scan is too long for one cycle of the control loop, so it is run in pieces: Start
 // takes the aircraft's position and the route as they are now (false: no scan, terrain
 // not usable), then each Run call does at most workBudget of it (TERRAIN_NAV_BAND_WORK_*)
-// and returns true, with the result, once the scan is complete. Only one scan at a time
+// and returns true, with the result, once the scan is complete. Only one scan at a time.
+// lineStartM, lineViewM, lineNextExtraM: the line the leg flies (terrainNavBandSetLine)
 bool terrainNavLookaheadRouteStart(const terrainNavMissionPath_t *path, const terrainNavBand_t *band, float courseDeg,
-                                   float distanceM, float climbRatio, float escapeRatio, float nextExtraRiseM);
+                                   float distanceM, float climbRatio, float escapeRatio, float nextExtraRiseM,
+                                   float lineStartM, float lineViewM, float lineNextExtraM);
 bool terrainNavLookaheadRouteRun(uint16_t workBudget, terrainNavLookaheadResult_t *result);
 
 // Home terrain height as latched when the GPS origin was set (no map query)

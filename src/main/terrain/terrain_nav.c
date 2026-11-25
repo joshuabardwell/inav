@@ -164,6 +164,10 @@ bool terrainNavLookahead(float bearingDeg, float distanceM, float climbRatio, fl
     result->samplesMissed = 0;
     result->bandSamples = 0;
     result->bandSkipped = 0;
+    result->lineValid = false;
+    result->lineMissed = false;
+    result->lineSlope = 0.0f;
+    result->lineTopM = 0.0f;
 
     gpsLocation_t pos;
     if (!terrainNavCurrentLocation(&pos)) {
@@ -268,7 +272,8 @@ static terrainNavRouteMap_t routeMap;
 static terrainNavBandScan_t routeScan;
 
 bool terrainNavLookaheadRouteStart(const terrainNavMissionPath_t *path, const terrainNavBand_t *band, float courseDeg,
-                                   float distanceM, float climbRatio, float escapeRatio, float nextExtraRiseM)
+                                   float distanceM, float climbRatio, float escapeRatio, float nextExtraRiseM,
+                                   float lineStartM, float lineViewM, float lineNextExtraM)
 {
     if (!terrainNavIsHealthy()) {
         return false;
@@ -289,6 +294,7 @@ bool terrainNavLookaheadRouteStart(const terrainNavMissionPath_t *path, const te
     };
     terrainNavBandScanStart(&routeScan, path, band, courseDeg, distanceM, TERRAIN_NAV_LOOKAHEAD_MAX_SAMPLES, climbRatio,
                             escapeRatio, nextExtraRiseM, baseHeightM, TERRAIN_GRID_BLOCK_CACHE_SIZE - 2, &terrain);
+    terrainNavBandSetLine(&routeScan, lineStartM, lineViewM, lineNextExtraM);
     return true;
 }
 
@@ -305,6 +311,10 @@ bool terrainNavLookaheadRouteRun(uint16_t workBudget, terrainNavLookaheadResult_
     result->samplesMissed = walked->samplesMissed + walked->bandMissed;
     result->bandSamples = walked->bandSamples;
     result->bandSkipped = walked->bandSkipped;
+    result->lineValid = walked->lineValid;
+    result->lineMissed = walked->lineMissed;
+    result->lineSlope = walked->lineSlope;
+    result->lineTopM = walked->lineTopM;
     return true;
 }
 
