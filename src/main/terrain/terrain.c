@@ -36,6 +36,8 @@
 ///////////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
+#include <math.h>
+
 #include "platform.h"
 
 #ifdef USE_TERRAIN
@@ -222,6 +224,18 @@ bool terrainGetReferenceHeightM(float *heightM)
 
     *heightM = (gpsUsable && gpsM < mapM) ? gpsM : mapM;
     return true;
+}
+
+bool terrainReferenceReadingsDisagree(void)
+{
+    float mapM;
+    float gpsM;
+    bool gpsUsable;
+    if (!terrainReferenceReadings(&mapM, &gpsUsable, &gpsM) || !gpsUsable) {
+        return false;
+    }
+
+    return fabsf(mapM - gpsM) > TERRAIN_REFERENCE_DISAGREE_M;
 }
 
 /**

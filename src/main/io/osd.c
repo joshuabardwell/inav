@@ -6379,6 +6379,12 @@ textAttributes_t osdGetSystemMessage(char *buff, size_t buff_size, bool isCenter
                         && terrainNavHoldGetWarning() != TERRAIN_NAV_HOLD_WARN_NONE) {
                     ADD_MSG(OSD_MESSAGE_STR(OSD_MSG_TERRAIN_AUTO_CLIMB));
                 }
+                /* ADDS MAXIMUM OF 1 MESSAGE TO TOTAL: the map and the GPS altitude
+                 * disagree about the take-off height, so the heights the hold works
+                 * with may be off by that much (the lower reference is in use) */
+                if (terrainNavHoldIsEngaged() && terrainReferenceReadingsDisagree()) {
+                    ADD_MSG(OSD_MESSAGE_STR(OSD_MSG_TERRAIN_REFERENCE));
+                }
 #endif
                 if (STATE(AIRPLANE)) {      /* ADDS MAXIMUM OF 3 MESSAGES TO TOTAL */
 #ifdef USE_FW_AUTOLAND

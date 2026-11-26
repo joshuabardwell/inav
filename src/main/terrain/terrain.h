@@ -31,6 +31,8 @@
 
 #define TERRAIN_TASK_RATE_HZ 5
 #define TERRAIN_NO_DATA_DELAY_MS 1000
+// The map and the GPS altitude are said to disagree about the take-off height beyond this
+#define TERRAIN_REFERENCE_DISAGREE_M 5.0f
 
 #define TERRAIN_TER_FILE_FORMAT_VERSION 50
 #define TERRAIN_SPACING 30
@@ -170,4 +172,8 @@ int32_t terrainGetLastDistanceCm(void);
 // aircraft stood when it armed, less its altitude there, or the GPS altitude of the altitude
 // zero when that is lower. False until the map has answered
 bool terrainGetReferenceHeightM(float *heightM);
+// True when the map and the GPS altitude put the take-off spot more than
+// TERRAIN_REFERENCE_DISAGREE_M apart: the map is wrong there, the GPS altitude is, or the
+// aircraft armed well above the mapped ground. The lower one is in use either way
+bool terrainReferenceReadingsDisagree(void);
 
