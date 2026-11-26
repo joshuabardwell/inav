@@ -694,6 +694,19 @@ static bool trackingActiveWaypoint(void)
     return matchesActiveWaypoint(&posControl.waypointList[posControl.activeWaypointIndex]);
 }
 
+terrainNavMissionLeg_e terrainNavMissionGetLeg(void)
+{
+    // Only while the hold produces terrain targets: without them the leg flies its stock
+    // line, and the hold's own warning says why
+    if (!trackingActiveWaypoint() || !mission.holdActive) {
+        return TERRAIN_NAV_MISSION_LEG_STOCK;
+    }
+
+    return (mission.mode == TERRAIN_NAV_MISSION_FOLLOW && mission.clearanceValid)
+        ? TERRAIN_NAV_MISSION_LEG_FOLLOW
+        : TERRAIN_NAV_MISSION_LEG_FLOOR;
+}
+
 // The active waypoint asks for a terrain mode, or its leg starts with the turn guard, whether
 // or not the gate tracks it yet
 static bool activeWaypointIsTerrainLeg(void)
