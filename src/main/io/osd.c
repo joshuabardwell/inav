@@ -1810,6 +1810,25 @@ static int32_t osdUpdateEfficiencyFilter(pt1Filter_t *state, timeUs_t *lastUpdat
     return (int32_t)state->state;
 }
 
+// VTX power as shown by the VTX elements: the vtxtable label padded to 3 chars, so a shorter
+// label clears a longer one, or the power level digit when there is no label.
+// (tfp_sprintf has no precision support, so copy by hand)
+static void osdFormatVtxPower(char *buff, const vtxDeviceOsdInfo_t *osdInfo)
+{
+    if (osdInfo->powerLabel) {
+        int i = 0;
+        for (; i < 3 && osdInfo->powerLabel[i]; i++) {
+            buff[i] = osdInfo->powerLabel[i];
+        }
+        for (; i < 3; i++) {
+            buff[i] = ' ';
+        }
+        buff[3] = '\0';
+    } else {
+        osdWriteChar(buff, osdInfo->powerIndexLetter);
+    }
+}
+
 static bool osdDrawSingleElement(uint8_t item)
 {
     uint16_t pos = osdLayoutsConfig()->item_pos[currentLayout][item];
@@ -2723,7 +2742,7 @@ static bool osdDrawSingleElement(uint8_t item)
             tfp_sprintf(buff, "CH:%c%s:", osdInfo.bandLetter, osdInfo.channelName);
             displayWrite(osdDisplayPort, elemPosX, elemPosY, buff);
 
-            osdWriteChar(buff, osdInfo.powerIndexLetter);
+            osdFormatVtxPower(buff, &osdInfo);
             if (isAdjustmentFunctionSelected(ADJUSTMENT_VTX_POWER_LEVEL)) TEXT_ATTRIBUTES_ADD_BLINK(elemAttr);
             displayWriteWithAttr(osdDisplayPort, elemPosX + 6, elemPosY, buff, elemAttr);
             return true;
@@ -2738,20 +2757,7 @@ static bool osdDrawSingleElement(uint8_t item)
             osdWriteChar(buff, SYM_VTX_POWER);
             displayWrite(osdDisplayPort, elemPosX, elemPosY, buff);
 
-            if (osdInfo.powerLabel) {
-                // vtxtable label, padded to 3 chars so a shorter label clears a longer one
-                // (tfp_sprintf has no precision support, so copy by hand)
-                int i = 0;
-                for (; i < 3 && osdInfo.powerLabel[i]; i++) {
-                    buff[i] = osdInfo.powerLabel[i];
-                }
-                for (; i < 3; i++) {
-                    buff[i] = ' ';
-                }
-                buff[3] = '\0';
-            } else {
-                osdWriteChar(buff, osdInfo.powerIndexLetter);
-            }
+            osdFormatVtxPower(buff, &osdInfo);
             if (isAdjustmentFunctionSelected(ADJUSTMENT_VTX_POWER_LEVEL)) TEXT_ATTRIBUTES_ADD_BLINK(elemAttr);
             displayWriteWithAttr(osdDisplayPort, elemPosX+1, elemPosY, buff, elemAttr);
             return true;
