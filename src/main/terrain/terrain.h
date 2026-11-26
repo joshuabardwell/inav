@@ -167,6 +167,7 @@ int32_t terrainGetLastAMSL(void);
 float getHeightAmslMeters(const gpsLocation_t *loc);
 int32_t terrainGetLastDistanceCm(void);
 // The map height (m) that the navigation's altitude zero stands for: the map where the
-// aircraft stood when it armed, less its altitude there. False until the map has answered
+// aircraft stood when it armed, less its altitude there, or the GPS altitude of the altitude
+// zero when that is lower. False until the map has answered
 bool terrainGetReferenceHeightM(float *heightM);
 
