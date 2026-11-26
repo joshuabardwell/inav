@@ -50,33 +50,6 @@
 // at 30 m cover ~1.9 km ahead, well beyond a practical climb-planning horizon
 #define TERRAIN_NAV_LOOKAHEAD_MAX_SAMPLES 64
 
-// Home terrain height, latched once the GPS origin is known and re-latched if
-// the origin moves - the same relative datum the data layer uses for its own
-// AGL, so map-datum errors cancel (docs: C-2)
-static bool homeHeightValid;
-static float homeHeightM;
-static int32_t homeHeightLat;
-static int32_t homeHeightLon;
-
-static bool terrainNavUpdateHomeHeight(void)
-{
-    if (!posControl.gpsOrigin.valid) {
-        homeHeightValid = false;
-        return false;
-    }
-    if (homeHeightValid && homeHeightLat == posControl.gpsOrigin.lat && homeHeightLon == posControl.gpsOrigin.lon) {
-        return true;
-    }
-    float heightM;
-    homeHeightValid = terrainNavGetHomeTerrainHeight(&heightM);
-    if (homeHeightValid) {
-        homeHeightM = heightM;
-        homeHeightLat = posControl.gpsOrigin.lat;
-        homeHeightLon = posControl.gpsOrigin.lon;
-    }
-    return homeHeightValid;
-}
-
 // The aircraft's position as the estimator sees it (not the raw GPS fix), so
 // the layer follows whatever INAV trusts for position
 static bool terrainNavCurrentLocation(gpsLocation_t *llh)
@@ -88,8 +61,10 @@ static bool terrainNavCurrentLocation(gpsLocation_t *llh)
 }
 
 // Healthy = terrain enabled, the SD reader alive, a usable position estimate
-// and the home terrain height known. Per-sample data availability is answered
-// by the height queries themselves (no data = block not loaded yet)
+// and the height reference known (terrainGetReferenceHeightM: the same relative
+// datum the data layer uses for its own AGL, so map-datum errors cancel).
+// Per-sample data availability is answered by the height queries themselves
+// (no data = block not loaded yet)
 bool terrainNavIsHealthy(void)
 {
     if (!terrainConfig()->terrainEnabled || isTerrainIoFailure()) {
@@ -98,7 +73,8 @@ bool terrainNavIsHealthy(void)
     if (posControl.flags.estPosStatus < EST_USABLE) {
         return false;
     }
-    return terrainNavUpdateHomeHeight();
+    float referenceM;
+    return terrainGetReferenceHeightM(&referenceM);
 }
 
 bool terrainNavGetAGLCm(int32_t *aglCm)
@@ -109,13 +85,15 @@ bool terrainNavGetAGLCm(int32_t *aglCm)
 
     gpsLocation_t here;
     float heightHereM;
-    if (!terrainNavCurrentLocation(&here) || !terrainNavGetHeightAtLocation(&here, &heightHereM)) {
+    float referenceM;
+    if (!terrainNavCurrentLocation(&here) || !terrainNavGetHeightAtLocation(&here, &heightHereM)
+            || !terrainGetReferenceHeightM(&referenceM)) {
         return false;
     }
 
-    // AGL = estimated altitude above home minus the terrain rise above home
+    // AGL = estimated altitude minus the terrain's rise above the height reference
     const int32_t agl = (int32_t)navGetCurrentActualPositionAndVelocity()->pos.z
-                        - (int32_t)((heightHereM - homeHeightM) * 100.0f);
+                        - (int32_t)((heightHereM - referenceM) * 100.0f);
     *aglCm = MAX(0, agl);
     return true;
 }
@@ -135,21 +113,6 @@ bool terrainNavGetHeightAtLocation(const gpsLocation_t *loc, float *heightM)
 
     *heightM = heightAmslM;
     return true;
-}
-
-bool terrainNavGetHomeTerrainHeight(float *heightM)
-{
-    if (!posControl.gpsOrigin.valid) {
-        return false;
-    }
-
-    const gpsLocation_t homeLoc = {
-        .lat = posControl.gpsOrigin.lat,
-        .lon = posControl.gpsOrigin.lon,
-        .alt = 0,
-    };
-
-    return terrainNavGetHeightAtLocation(&homeLoc, heightM);
 }
 
 bool terrainNavLookahead(float bearingDeg, float distanceM, float climbRatio, float escapeRatio, terrainNavLookaheadResult_t *result)
@@ -216,16 +179,12 @@ bool terrainNavLookahead(float bearingDeg, float distanceM, float climbRatio, fl
     return true;
 }
 
-// The home terrain height the AGL above is measured against, as latched when
-// the GPS origin was set - no map query, so it answers far from home too
+// The height reference the AGL above is measured against (terrainGetReferenceHeightM):
+// the map height that altitude zero stands for. Kept from arming, so it answers far
+// from the take-off spot too
 bool terrainNavGetLatchedHomeHeight(float *heightM)
 {
-    if (!terrainNavUpdateHomeHeight()) {
-        return false;
-    }
-
-    *heightM = homeHeightM;
-    return true;
+    return terrainGetReferenceHeightM(heightM);
 }
 
 // The band walk's view of the map (terrain_nav_mission_logic.h): points are metres north

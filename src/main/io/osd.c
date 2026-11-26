@@ -6191,11 +6191,14 @@ timeMs_t systemMessageCycleTime(unsigned messageCount, const char **messages){
 }
 
 #ifdef USE_TERRAIN
-/* The terrain hold's messages, at most 2: the worst warning, and - while the
+/* The terrain hold's messages, at most 3: the worst warning, and - while the
  * hold is actually climbing to the minimum - the auto-climb info alternating
  * beneath it, so the pilot always sees both the danger and the action being
- * taken. *urgent is set to the message that has to blink (the floor warnings) */
-static unsigned osdTerrainNavMessages(const char *messages[2], const char **urgent)
+ * taken. *urgent is set to the message that has to blink (the floor warnings).
+ * The third: the map and the GPS altitude disagree about the take-off height,
+ * so the heights the hold works with may be off by that much (the lower
+ * reference is in use) */
+static unsigned osdTerrainNavMessages(const char *messages[3], const char **urgent)
 {
     unsigned count = 0;
 
@@ -6233,6 +6236,9 @@ static unsigned osdTerrainNavMessages(const char *messages[2], const char **urge
             && terrainNavHoldGetWarning() != TERRAIN_NAV_HOLD_WARN_AUTO_CLIMB
             && terrainNavHoldGetWarning() != TERRAIN_NAV_HOLD_WARN_NONE) {
         messages[count++] = OSD_MESSAGE_STR(OSD_MSG_TERRAIN_AUTO_CLIMB);
+    }
+    if (terrainNavHoldIsEngaged() && terrainReferenceReadingsDisagree()) {
+        messages[count++] = OSD_MESSAGE_STR(OSD_MSG_TERRAIN_REFERENCE);
     }
     return count;
 }
@@ -6338,7 +6344,7 @@ textAttributes_t osdGetSystemMessage(char *buff, size_t buff_size, bool isCenter
                  * leg (RTH, failsafe, a stock leg) the hold is off and has none.
                  * ADDS MAXIMUM OF 2 MESSAGES TO TOTAL */
                 if (FLIGHT_MODE(NAV_WP_MODE) && !FLIGHT_MODE(FAILSAFE_MODE)) {
-                    const char *terrainMessages[2];
+                    const char *terrainMessages[3];
                     const unsigned terrainMessageCount = osdTerrainNavMessages(terrainMessages, &terrainUrgentMessage);
                     if (terrainUrgentMessage) {
                         /* A floor alarm (PULL UP, TURN AWAY) takes the place of the
@@ -6449,8 +6455,8 @@ textAttributes_t osdGetSystemMessage(char *buff, size_t buff_size, bool isCenter
                 }
 #endif
 #ifdef USE_TERRAIN
-                {   /* ADDS MAXIMUM OF 2 MESSAGES TO TOTAL */
-                    const char *terrainMessages[2];
+                {   /* ADDS MAXIMUM OF 3 MESSAGES TO TOTAL */
+                    const char *terrainMessages[3];
                     const unsigned terrainMessageCount = osdTerrainNavMessages(terrainMessages, &terrainUrgentMessage);
                     for (unsigned ii = 0; ii < terrainMessageCount; ii++) {
                         ADD_MSG(terrainMessages[ii]);
