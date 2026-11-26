@@ -81,6 +81,14 @@ static struct {
  * where the GPS origin was set by the first fix. So the map is read where the aircraft
  * stands while it is disarmed, and kept with the altitude it had there: the reference is
  * that map height minus that altitude. Arming keeps the last such point for the flight.
+ *
+ * The GPS altitude of the altitude zero (the GPS origin's altitude) is a second reading of
+ * the same height, on the same datum as the map. The two differ by the map's error at the
+ * take-off spot, the GPS altitude error and the height of the aircraft above the ground when
+ * it armed. The lower of the two is used: a reference that is too high puts the ground too
+ * low and the aircraft closer to it than it believes, a reference that is too low only
+ * makes it fly higher. So a map that is too high at the take-off spot no longer lowers the
+ * whole flight, and a GPS altitude that reads high changes nothing.
  */
 typedef struct {
     bool located;           // a position and altitude have been recorded
@@ -88,6 +96,7 @@ typedef struct {
     float altitudeCm;       // estimated altitude at that position, local frame
     bool heightFound;       // the map has answered for that position
     float heightM;
+    bool gpsUsable;         // the GPS altitude was good enough there to be the second reading
 } terrainGroundPoint_t;
 
 static terrainGroundPoint_t groundDisarmed;     // follows the aircraft while it is disarmed
@@ -173,6 +182,8 @@ static void terrainGroundPointUpdate(void)
             point->location = here;
             point->altitudeCm = pos->z;
             point->heightFound = false;
+            point->gpsUsable = STATE(GPS_FIX) && gpsSol.fixType == GPS_FIX_3D
+                               && gpsSol.epv < positionEstimationConfig()->max_eph_epv;
         }
     }
 
@@ -186,14 +197,30 @@ static void terrainGroundPointUpdate(void)
     }
 }
 
-bool terrainGetReferenceHeightM(float *heightM)
+// The two readings of the height reference: from the map, and from the GPS altitude
+static bool terrainReferenceReadings(float *mapM, bool *gpsUsable, float *gpsM)
 {
     const terrainGroundPoint_t *point = terrainGroundPointInUse();
     if (!point->located || !point->heightFound) {
         return false;
     }
 
-    *heightM = point->heightM - point->altitudeCm * 0.01f;
+    *mapM = point->heightM - point->altitudeCm * 0.01f;
+    *gpsUsable = point->gpsUsable && posControl.gpsOrigin.valid;
+    *gpsM = posControl.gpsOrigin.alt * 0.01f;
+    return true;
+}
+
+bool terrainGetReferenceHeightM(float *heightM)
+{
+    float mapM;
+    float gpsM;
+    bool gpsUsable;
+    if (!terrainReferenceReadings(&mapM, &gpsUsable, &gpsM)) {
+        return false;
+    }
+
+    *heightM = (gpsUsable && gpsM < mapM) ? gpsM : mapM;
     return true;
 }
 
