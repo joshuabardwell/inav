@@ -55,9 +55,6 @@ bool terrainNavGetAGLCm(int32_t *aglCm);
 // miss the block is scheduled for loading and the call fails - retry later.
 bool terrainNavGetHeightAtLocation(const gpsLocation_t *loc, float *heightM);
 
-// Terrain height (map datum, meters) at the GPS origin (home)
-bool terrainNavGetHomeTerrainHeight(float *heightM);
-
 // Walk the map from the current position along bearingDeg for distanceM,
 // accumulating achievable climb (climbRatio = m of climb per m travelled),
 // and report the worst height deficit found. A descending path (negative

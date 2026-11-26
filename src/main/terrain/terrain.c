@@ -73,15 +73,25 @@ static struct {
     .terrainAMSL = 0,
 };
 
-static struct {
-    bool homeAltitudeFound;
-    float homeAltitudeM;
-    gpsLocation_t homeLocation;
-} terrainHomePos = {
-    .homeAltitudeFound = false,
-    .homeAltitudeM = 0.0f,
-    .homeLocation = {.lat = 0, .lon = 0},
-};
+/*
+ * The height reference: the map height that the navigation's altitude zero stands for.
+ * Height above ground = estimated altitude - (map height here - reference).
+ *
+ * The altitude zero is set where the aircraft arms (inav_reset_altitude), which need not be
+ * where the GPS origin was set by the first fix. So the map is read where the aircraft
+ * stands while it is disarmed, and kept with the altitude it had there: the reference is
+ * that map height minus that altitude. Arming keeps the last such point for the flight.
+ */
+typedef struct {
+    bool located;           // a position and altitude have been recorded
+    gpsLocation_t location;
+    float altitudeCm;       // estimated altitude at that position, local frame
+    bool heightFound;       // the map has answered for that position
+    float heightM;
+} terrainGroundPoint_t;
+
+static terrainGroundPoint_t groundDisarmed;     // follows the aircraft while it is disarmed
+static terrainGroundPoint_t groundFlight;       // the point of the flight, taken at arming
 
 /**
  * @brief Get the height above mean sea level (AMSL) in meters for a given GPS location.
@@ -136,11 +146,62 @@ void terrainInit(void)
 {
 }
 
+// Arming hands the disarmed point over to the flight. An emergency re-arm in the air keeps
+// the flight's point, as the estimator keeps its altitude zero
+static terrainGroundPoint_t *terrainGroundPointInUse(void)
+{
+    static bool wasArmed = false;
+
+    const bool armed = ARMING_FLAG(ARMED);
+    if (armed && !wasArmed && !(STATE(IN_FLIGHT_EMERG_REARM) && groundFlight.located)) {
+        groundFlight = groundDisarmed;
+    }
+    wasArmed = armed;
+
+    return armed ? &groundFlight : &groundDisarmed;
+}
+
+static void terrainGroundPointUpdate(void)
+{
+    terrainGroundPoint_t *point = terrainGroundPointInUse();
+
+    if (!ARMING_FLAG(ARMED) && posControl.flags.estPosStatus >= EST_USABLE) {
+        const fpVector3_t *pos = &navGetCurrentActualPositionAndVelocity()->pos;
+        gpsLocation_t here;
+        if (geoConvertLocalToGeodetic(&here, &posControl.gpsOrigin, pos)) {
+            point->located = true;
+            point->location = here;
+            point->altitudeCm = pos->z;
+            point->heightFound = false;
+        }
+    }
+
+    // In flight only a point whose block was not loaded at arming is still asked for
+    if (point->located && !point->heightFound) {
+        const float heightM = getHeightAmslMeters(&point->location);
+        if (heightM != TERRAIN_STATUS_NO_AMSL_DATA) {
+            point->heightFound = true;
+            point->heightM = heightM;
+        }
+    }
+}
+
+bool terrainGetReferenceHeightM(float *heightM)
+{
+    const terrainGroundPoint_t *point = terrainGroundPointInUse();
+    if (!point->located || !point->heightFound) {
+        return false;
+    }
+
+    *heightM = point->heightM - point->altitudeCm * 0.01f;
+    return true;
+}
+
 /**
  * @brief Update the terrain subsystem.
  *
  * This function checks the status of the SD card and attempts to load terrain data into the cache.
- * It also tries to determine the home altitude based on the GPS origin if it hasn't been found yet.
+ * It also keeps the height reference: the map height where the aircraft stands before it arms.
  */
 void terrainUpdateTask(timeUs_t currentTimeUs)
 {
@@ -154,39 +215,22 @@ void terrainUpdateTask(timeUs_t currentTimeUs)
         return;
     }
 
-    if(ARMING_FLAG(ARMED) && terrainHomePos.homeAltitudeFound == false){
-        //vehicle is armed and we don't have loaded values for home position, don't try load from SD card durting flight if we are not sure SD it's possible to load data
+    terrainGroundPointUpdate();
+
+    float referenceM;
+    if (ARMING_FLAG(ARMED) && !terrainGetReferenceHeightM(&referenceM)) {
+        // armed without a height reference: the block under the take-off point was not
+        // loaded. That point is still asked for above; nothing else is read from the card
         return;
     }
 
     /////////////////////////////////////////////////////////////////////////////////////////////////////
-    //try to find home altitude to home offset
-    if(terrainHomePos.homeAltitudeFound == false && posControl.gpsOrigin.valid && (posControl.gpsOrigin.lat != terrainHomePos.homeLocation.lat || posControl.gpsOrigin.lon != terrainHomePos.homeLocation.lon)) {
-
-        gpsLocation_t homeLoc = {
-                .lat = posControl.gpsOrigin.lat,
-                .lon = posControl.gpsOrigin.lon,
-        };
-
-        float heightASLHome = getHeightAmslMeters(&homeLoc);
-
-        if(heightASLHome != TERRAIN_STATUS_NO_AMSL_DATA){
-            terrainHomePos.homeAltitudeFound = true;
-            terrainHomePos.homeAltitudeM = heightASLHome;
-            terrainHomePos.homeLocation.lat = posControl.gpsOrigin.lat;
-            terrainHomePos.homeLocation.lon = posControl.gpsOrigin.lon;
-        }
-    }
-    /////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-    /////////////////////////////////////////////////////////////////////////////////////////////////////
-    if(terrainHomePos.homeAltitudeFound)
+    if(terrainGetReferenceHeightM(&referenceM))
     {
         float heightASL = getHeightAmslMeters(&gpsSol.llh);
         if(heightASL != TERRAIN_STATUS_NO_AMSL_DATA){
             terrainHeight.terrainAMSL = (int32_t)(heightASL * 100.0f);
-            terrainHeight.terrainAGL =  MAX(0, ((int32_t)getEstimatedActualPosition(Z) + (int32_t)(terrainHomePos.homeAltitudeM * 100.0f)) - terrainHeight.terrainAMSL);
+            terrainHeight.terrainAGL =  MAX(0, ((int32_t)getEstimatedActualPosition(Z) + (int32_t)(referenceM * 100.0f)) - terrainHeight.terrainAMSL);
             terrainHeight.lastUpdate = millis();
         }
     }
