@@ -89,5 +89,6 @@ bool terrainNavLookaheadRouteStart(const terrainNavMissionPath_t *path, const te
                                    float lineStartM, float lineViewM, float lineNextExtraM);
 bool terrainNavLookaheadRouteRun(uint16_t workBudget, terrainNavLookaheadResult_t *result);
 
-// Home terrain height as latched when the GPS origin was set (no map query)
+// The height reference: the map height that altitude zero stands for, kept from arming
+// (no map query)
 bool terrainNavGetLatchedHomeHeight(float *heightM);

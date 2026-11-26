@@ -179,16 +179,12 @@ bool terrainNavLookahead(float bearingDeg, float distanceM, float climbRatio, fl
     return true;
 }
 
-// The home terrain height the AGL above is measured against, as latched when
-// the GPS origin was set - no map query, so it answers far from home too
+// The height reference the AGL above is measured against (terrainGetReferenceHeightM):
+// the map height that altitude zero stands for. Kept from arming, so it answers far
+// from the take-off spot too
 bool terrainNavGetLatchedHomeHeight(float *heightM)
 {
-    if (!terrainNavUpdateHomeHeight()) {
-        return false;
-    }
-
-    *heightM = homeHeightM;
-    return true;
+    return terrainGetReferenceHeightM(heightM);
 }
 
 // The band walk's view of the map (terrain_nav_mission_logic.h): points are metres north
