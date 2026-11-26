@@ -102,6 +102,7 @@
 
 #ifdef USE_TERRAIN
 #include "terrain/terrain_nav_hold.h"
+#include "terrain/terrain_nav_mission.h"
 #endif
 
 #include "rx/rx.h"
@@ -6216,6 +6217,34 @@ static unsigned osdTerrainNavMessages(const char *messages[2], const char **urge
     }
     return count;
 }
+
+/* A waypoint leg flown with terrain protection says so at the end of its waypoint
+ * message ("TO WP 2/5 (1.2K) FLOOR"), so it can be told from a leg without: a terrain
+ * leg that needs no warning draws nothing else. A stock leg, and a terrain leg flown as
+ * stock for want of terrain data, keep the stock message. The longest message is 28
+ * characters ("TO WP 120/120 (" + 5 of distance + ") FOLLOW"); a tag that does not fit
+ * is left out, not cut */
+static void osdTerrainNavLegTag(char *message, size_t size)
+{
+    const char *tag;
+
+    switch (terrainNavMissionGetLeg()) {
+        case TERRAIN_NAV_MISSION_LEG_FLOOR:
+            tag = OSD_MESSAGE_STR(OSD_MSG_TERRAIN_LEG_FLOOR);
+            break;
+        case TERRAIN_NAV_MISSION_LEG_FOLLOW:
+            tag = OSD_MESSAGE_STR(OSD_MSG_TERRAIN_LEG_FOLLOW);
+            break;
+        default:
+            return;
+    }
+
+    const size_t length = strlen(message);
+    if (length + 1 + strlen(tag) <= MIN(size - 1, (size_t)OSD_MESSAGE_LENGTH)) {
+        message[length] = ' ';
+        strcpy(message + length + 1, tag);
+    }
+}
 #endif
 
 textAttributes_t osdGetSystemMessage(char *buff, size_t buff_size, bool isCenteredText)
@@ -6260,6 +6289,9 @@ textAttributes_t osdGetSystemMessage(char *buff, size_t buff_size, bool isCenter
                     char buf[6];
                     osdFormatDistanceSymbol(buf, posControl.wpDistance, 0, 3);
                     tfp_sprintf(messageBuf, "TO WP %u/%u (%s)", getGeoWaypointNumber(posControl.activeWaypointIndex), posControl.geoWaypointCount, buf);
+#ifdef USE_TERRAIN
+                    osdTerrainNavLegTag(messageBuf, sizeof(messageBuf));
+#endif
                     ADD_MSG(messageBuf);
                 } else if (NAV_Status.state == MW_NAV_STATE_HOLD_TIMED) {
                     if (navConfig()->general.waypoint_enforce_altitude && !posControl.wpAltitudeReached) {

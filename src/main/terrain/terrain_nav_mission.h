@@ -97,6 +97,18 @@ bool terrainNavMissionLineAglCm(int32_t *aglCm);
 // height at the waypoint known
 uint32_t terrainNavMissionDebugFlags(void);
 
+// What the leg flown right now does about the terrain, for the OSD's waypoint message.
+// It is what the aircraft flies, not what the waypoint asks for: a leg without usable
+// terrain data is a stock leg here, a follow leg that does not know its height yet flies
+// as a floor leg, and so does the turn guard on a leg without a terrain option
+typedef enum {
+    TERRAIN_NAV_MISSION_LEG_STOCK = 0,  // the stock line and nothing else
+    TERRAIN_NAV_MISSION_LEG_FLOOR,      // the stock line, never under terrain + minimum + margin
+    TERRAIN_NAV_MISSION_LEG_FOLLOW,     // holds its height above the ground
+} terrainNavMissionLeg_e;
+
+terrainNavMissionLeg_e terrainNavMissionGetLeg(void);
+
 // --- Called from the waypoint state machine (navigation.c) ---
 
 // The altitude target for the leg in progress: stockZCm adjusted for the
