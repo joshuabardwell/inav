@@ -32,7 +32,7 @@
 #define TERRAIN_TASK_RATE_HZ 5
 #define TERRAIN_NO_DATA_DELAY_MS 1000
 // The map and the GPS altitude are said to disagree about the take-off height beyond this
-#define TERRAIN_REFERENCE_DISAGREE_M 10.0f
+#define TERRAIN_REFERENCE_DISAGREE_M 5.0f
 
 #define TERRAIN_TER_FILE_FORMAT_VERSION 50
 #define TERRAIN_SPACING 30
