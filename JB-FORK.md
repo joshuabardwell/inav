@@ -20,23 +20,23 @@ history on `jb/build` shows exactly what changed and when.
 
 ### Terrain handling on waypoint legs (fixed wing)
 
-Upstream's [terrain-following cruise mode](Navigation%20Terrain%20Following.md) works only
-in 3D Cruise and steps aside for waypoint missions. In this fork a waypoint can ask for
+Upstream's [terrain-following cruise mode](docs/Navigation%20Terrain%20Following.md) works
+only in 3D Cruise and steps aside for waypoint missions. In this fork a waypoint can ask for
 terrain handling on the leg flown toward it, as a stock leg, a **floor**, or **follow**,
 with its own minimum height above ground (50 to 120 m).
 
 - What each option does, the look-ahead over turns, the turn guard and the OSD messages:
-  [Waypoint missions](Navigation%20Terrain%20Following.md#waypoint-missions).
+  [Waypoint missions](docs/Navigation%20Terrain%20Following.md#waypoint-missions).
 - The rules the look-ahead keeps: the minimum height above ground is never traded for a
   smoother line; a terrain leg flies a line over the ground ahead, not the ground's contour.
 - How take-off height is fixed at arming, and the `TERRAIN: MAP/GPS ALT DIFFER` warning:
   same page, under the OSD table.
 - The option travels with the mission in the waypoint's `p3` field, so a mission file
-  carries it. The bit layout is in [Navigation.md](Navigation.md).
+  carries it. The bit layout is in [Navigation.md](docs/Navigation.md).
 
 It needs what upstream's terrain feature needs: a flight controller with more than 256 KB
 of RAM (H7, or an F7 such as STM32F745/F746/F765), an SD card, and `.TER` terrain files made
-with the generator described in [Terrain.md](Terrain.md). Set `terrain_enabled = ON`.
+with the generator described in [Terrain.md](docs/Terrain.md). Set `terrain_enabled = ON`.
 
 The fork does not change upstream's flight logic (attitude, bank and energy control).
 Terrain legs work around its behaviour, and where that behaviour limits a terrain leg the
@@ -47,7 +47,7 @@ documentation says so.
 Betaflight-style `vtxtable`: your own bands, channel frequencies and power labels, with the
 same CLI syntax, so a Betaflight block pastes in unchanged. Works with SmartAudio, IRC Tramp
 and MSP VTXs. SmartAudio is also reported as ready only while the VTX answers, and the OSD can
-show the table's power label. See [VTx.md](VTx.md#vtx-table-vtxtable).
+show the table's power label. See [VTx.md](docs/VTx.md#vtx-table-vtxtable).
 
 ## Use it with the fork's Configurator
 
@@ -59,9 +59,9 @@ Use the same `jb/build` branch on both sides: new MSP commands are added to both
 
 ## Building
 
-Build as for upstream INAV: [Building in Linux](development/Building%20in%20Linux.md),
-[Windows with WSL](development/Building%20in%20Windows%2010%20or%2011%20with%20Linux%20Subsystem.md),
-or the other guides in [docs/development](development/). Clone this repository, check out
+Build as for upstream INAV: [Building in Linux](docs/development/Building%20in%20Linux.md),
+[Windows with WSL](docs/development/Building%20in%20Windows%2010%20or%2011%20with%20Linux%20Subsystem.md),
+or the other guides in [docs/development](docs/development/). Clone this repository, check out
 `jb/build`, and build your target. Do not build on a cloud-synced folder.
 
 A build is named `jb-<build date>-<commit>`, for example `jb-20261126-cf085428`. The same
