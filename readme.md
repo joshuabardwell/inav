@@ -1,5 +1,14 @@
 # INAV - navigation capable flight controller
 
+# JB fork of INAV 10 (test builds)
+
+> This is a test fork of INAV 10, not an official release. It adds terrain handling on
+> waypoint legs for fixed wing and a Betaflight-style VTX table. No firmware files are
+> published: you build it yourself from the `jb/build` branch.
+> **[What is different, how to build it, how to report results](docs/JB-FORK.md)**
+>
+> The rest of this file is upstream's.
+
 # INAV Documentation
 > For documentation on using INAV, see our new docs site at [inavflight.github.io](https://inavflight.github.io/)
 
