@@ -1,3 +1,16 @@
+> **This is JB's INAV 10 fork, a test fork, not an official release.** It goes with
+> [INAV Configurator JB](https://github.com/joshuabardwell/inav-configurator) and adds:
+>
+> - **Terrain handling on waypoint legs (fixed wing):** each waypoint can ask for a floor or
+>   terrain follow on the leg flown toward it, with its own minimum height above ground.
+> - **A Betaflight-style VTX table:** your own bands, frequencies and power labels for
+>   SmartAudio, IRC Tramp and MSP VTXs, in Betaflight's CLI syntax.
+>
+> No firmware files are published: you build it yourself from the `jb/build` branch.
+> **[What is different, how to build it, how to report results](JB-FORK.md)**
+>
+> The rest of this file is upstream's.
+
 # INAV - navigation capable flight controller
 
 # INAV Documentation
